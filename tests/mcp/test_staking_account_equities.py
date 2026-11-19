@@ -23,9 +23,9 @@ async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api
 
     api.add(ep.STAKING_BALANCE, {"model_id": "m1", "total_staked": 50.0})
     api.add(ep.STAKING_HISTORY, {"history": []})
-    api.add(ep.STAKING_DEPOSIT_ADDRESS, {"address": WALLET})
-    api.add(ep.STAKING_FORWARDER_BALANCE, {"balance_micro": 25_000_000})
-    api.add(ep.STAKING_VAULT, {"vault_address": WALLET, "automation_enabled": True})
+    api.add(ep.STAKING_STRATEGY, {"enabled": True, "deployed": True, "address": WALLET})
+    api.add(ep.STAKING_PLANS, [{"model_id": "m1", "mode": "compound", "enabled": True}])
+    api.add(ep.STAKING_POSITIONS, [{"model_id": "m1", "stake_micro": 15_000_000}])
     api.add(ep.STAKING_WALLETS, {"withdraw_eligible": True, "frozen": False})
     api.add(ep.EVENT_STAKING_SUMMARY, {"staking_armed": True, "principal_micro": 10_000_000})
     api.add(ep.STAKING_STAKE, {"id": "stk-1", "status": "pending"})
@@ -34,7 +34,7 @@ async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api
     api.add(ep.STAKING_CLAIM, {"claimed": True})
     api.add(ep.STAKING_RELAY_STAKE, {"relayed": True})
     api.add(ep.STAKING_RELAY_CLAIM, {"relayed": True})
-    api.add(ep.STAKING_VAULT_CONFIG_TX, {"to": WALLET, "data": "0x1234"})
+    api.add(ep.STAKING_PLAN_SET, {"model_id": "m1", "mode": "compound", "enabled": True})
     api.add(ep.EVENT_STAKING_ALLOC_SET, {"model_id": "m1", "amount_micro": 5_000_000})
     api.add(ep.EVENT_STAKING_ALLOC_DEL, {"deleted": True})
     api.add(ep.STAKING_WITHDRAW, {"tx_id": "wd-1", "status": "submitted"})
@@ -48,11 +48,10 @@ async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api
     async with session(authed_settings, api, elicitation_callback=accept) as client:
         assert (await call(client, "get_stake_balance", model_id="m1"))["total_staked"] == 50.0
         assert (await call(client, "get_staking_history", model_id="m1"))["history"] == []
-        assert (await call(client, "get_deposit_address"))["address"] == WALLET
-        assert (await call(client, "get_forwarder_balance"))["balance_micro"] == 25_000_000
-        assert (await call(client, "get_staking_vault", models=["m1"]))[
-            "automation_enabled"
-        ] is True
+        assert (await call(client, "get_staking_strategy"))["address"] == WALLET
+        assert (await call(client, "get_staking_plans"))["items"][0]["model_id"] == "m1"
+        positions = await call(client, "get_staking_positions")
+        assert positions["items"][0]["stake_micro"] == 15_000_000
         assert (await call(client, "get_wallet_status"))["withdraw_eligible"] is True
         assert (await call(client, "get_event_staking"))["staking_armed"] is True
         assert (await call(client, "list_unconfirmed_writes"))["count"] == 0
@@ -65,7 +64,13 @@ async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api
         await call(client, "claim_payout", model_id="m1", round_id="42")
         await call(client, "relay_stake", model_id="m1")
         await call(client, "relay_claim", round_id=42)
-        await call(client, "build_vault_config_tx", model_id="m1", per_round_stake_usdc="15")
+        await call(
+            client,
+            "set_staking_plan",
+            model_id="m1",
+            per_round_stake_usdc="15",
+            mode="compound",
+        )
         await call(
             client, "set_stake_allocation", model="m1", amount_micro=5_000_000, window="round_1"
         )

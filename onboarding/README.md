@@ -8,7 +8,7 @@ Treat the Python source under [src/mcp_server_everesteer/](../src/mcp_server_eve
 
 | Module | Topic | Key Files |
 |---|---|---|
-| [01 — Agentic Foundations](01-agentic-foundations.md) | Why MCP splits Tools, Resources, and Prompts; capability visibility; keeping the model's context focused | `capabilities.py`, `resources.py`, `prompts.py`, `knowledge/` |
+| [01 — Agentic Foundations](01-agentic-foundations.md) | Why MCP splits Tools, Resources, and Prompts; capability visibility; keeping the model's context focused | `capabilities.py`, `resources.py`, `prompts.py` |
 | [02 — Control-Plane Architecture](02-control-plane-architecture.md) | The 6-layer dependency graph; tracing a tool call from MCP/LangGraph to HTTP and credential-free S3 storage | `tools.py`, `ops/registry.py`, `client/base.py`, `client/transfer.py` |
 | [03 — State, Money, and Safety](03-state-money-and-safety.md) | Exact micro-USDC math, default-closed gates, human confirmations, and the SQLite write journal finite-state machine | `money.py`, `safety.py`, `journal.py`, `config.py` |
 | [04 — Hands-On Labs](04-hands-on-labs.md) | Four runnable terminal exercises covering CLI introspection, mocked MCP sessions, journal transitions, and property tests | `cli.py`, `tests/mcp/`, `tests/unit/test_invariants.py` |

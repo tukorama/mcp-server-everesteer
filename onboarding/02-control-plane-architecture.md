@@ -12,7 +12,7 @@ The package is structured as a strict directed acyclic graph (DAG) of 6 layers. 
 | **1 — State & Config** | `config.py`, `journal.py`, `capabilities.py`, `models.py` | Restricted `.env` loading, SQLite finite-state write journal, gate visibility rules, Pydantic output models |
 | **2 — Transport & Safety** | `client/`, `safety.py` | Endpoint registry (`106` routes), GET-only retry policy, presigned CDN isolation, USDC caps & duplicate locks |
 | **3 — Operations** | `ops/` (`registry.py`, `core.py`, `models_api.py`, `compete.py`, `compute.py`, `account.py`, `staking.py`, `equities.py`) | `91` transport-agnostic `@operation` functions + shared bounded `Call.poll_until` engine |
-| **4 — Knowledge & Presentation** | `knowledge/`, `diagrams.py`, `prompts.py`, `resources.py` | Markdown guides, Mermaid generators, MCP Prompts and Resources |
+| **4 — Prompts & Presentation** | `diagrams.py`, `prompts.py`, `resources.py` | System guide, Mermaid generators, MCP Prompts and live Resources |
 | **5 — Delivery Surfaces** | `tools.py`, `server.py`, `http_app.py`, `cli.py`, `integrations/langgraph.py` | MCP stdio / Streamable HTTP (+ `BearerAuth`), CLI, and in-process LangGraph tools |
 
 Generate the live system diagram anytime straight from code:

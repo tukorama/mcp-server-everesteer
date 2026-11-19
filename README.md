@@ -14,9 +14,9 @@ Driving Everesteer from an autonomous coding or research agent breaks down when 
 
 | Area | Official `everesteer-api` (0.5.0) | `mcp-server-everesteer` |
 |---|---|---|
-| **Layering** | 2,778-line sync `client.py` + 3,600-line MCP wrapper | 6-layer async architecture: transport → safety/journal → models → ops → knowledge → MCP / LangGraph / CLI |
+| **Layering** | 2,778-line sync `client.py` + 3,600-line MCP wrapper | 6-layer async architecture: transport → safety/journal → models → ops → prompts/resources → MCP / LangGraph / CLI |
 | **Control plane vs. modeling** | Bundles `plotnine`/`matplotlib`, ASCII table formatters, `numpy`/`pandas`/`scipy`, and deprecated shims | **Zero** visualization, **zero** plotting, **zero** ML/dataframe dependencies (`httpx2`, `mcp`, `pydantic`, `starlette`, `uvicorn`) |
-| **Agent token economy** | Multi-paragraph essays duplicated across raw tool schemas | Consolidated agentic tools in 6 cohesive toolsets + `everesteer://docs/*` resources + dynamic `agent_guide` |
+| **Agent token economy** | Multi-paragraph essays duplicated across raw tool schemas | Consolidated agentic tools in 6 cohesive toolsets + live `everesteer://*` resources + dynamic `agent_guide` |
 | **Write & money safety** | Unguarded writes, no caps, no confirmation, no write journal | 3 default-closed gates (`ALLOW_WRITES`, `ALLOW_STAKING`, `ALLOW_WITHDRAWALS`), micro-USDC integer validation (floats refused), daily SQLite caps, MCP Elicitation + LangGraph `interrupt()` |
 | **Long operations** | Blocking `time.sleep` loops that time out in Claude Desktop | Async polling with MCP progress notifications and a **45 s client wait cap** returning resumable `pending` state |
 | **LangGraph** | Not supported | Native `[langgraph]` extra (`get_everesteer_tools`, `create_everesteer_agent`, `draw_mermaid`) with `Command(resume=...)` approvals |
@@ -41,7 +41,7 @@ flowchart TB
         subgraph c_core["Agentic Control Plane"]
             direction LR
             ops_eng["Operations & Capabilities<br/>[Component: ops/ + capabilities.py]<br/>6 toolsets · 3 gates · 45s wait cap · progress"]
-            know["Knowledge & Prompts<br/>[Component: knowledge/ + resources]<br/>everesteer://docs/* · dynamic AGENT_GUIDE"]
+            know["Prompts & Live Resources<br/>[Component: prompts.py + resources.py]<br/>everesteer://* · dynamic AGENT_GUIDE"]
         end
 
         subgraph c_guard["Safety, Models & State"]
@@ -105,7 +105,7 @@ flowchart LR
     t_path -- "Manual Per-Round" --> t_man["validate_futures_submission<br/>→ submit_futures_predictions"]
     t_pkl --> t_track["get_submission_status<br/>→ get_daily_progression (T+1..T+20)<br/>→ get_scores"]
     t_man --> t_track
-    t_track --> t_stake["Optional: Staking / Vault<br/>(ALLOW_STAKING=true)"]
+    t_track --> t_stake["Optional: Strategy / Stake Plans<br/>(ALLOW_STAKING=true)"]
 
     mode -- "Hackathon Event" --> h_data["download_dataset<br/>train (labeled) + live/val (blank)"]
     h_data --> h_lane{"Target Board?"}
@@ -304,14 +304,14 @@ Add `"EVERESTEER_ALLOW_WRITES": "true"` in your MCP client's `env` block (or she
 **Live Tournament Auto-Submit (Recommended):**
 
 1. `create_model` (omit `name` to receive a server-generated opaque name so public leaderboards never leak your model family).
-2. Train locally in your Python environment and serialize a `cloudpickle` callable `predict(live_features)` (or `predict(live_features, live_benchmark_models)`) returning a single-column `pandas.DataFrame` with finite values in `[0, 1]`. Read `everesteer://docs/submission-contract` for the full contract.
-3. `upload_model(model_id=..., file_path="model.pkl", python_version="3.12")` — streams straight to presigned storage without hitting API proxy size limits.
+2. Train locally in your Python environment and serialize a `cloudpickle` callable `predict(live_features)` (or `predict(live_features, live_benchmark_models)`, where `live_benchmark_models` is `eiq_minera_model`; offline benchmark files use `v1_sherpa`) returning a single-column `pandas.DataFrame` with finite values in `[0, 1]`. Supported sandbox runtimes (`3.11` default, `3.12`, `3.13`) and pin URLs are reported live by `get_started`.
+3. `upload_model(model_id=..., file_path="model.pkl", python_version="3.12")` — streams straight to presigned storage without hitting API proxy size limits — or deploy directly from hosted compute via `train_model(deploy_to_model_id=...)` / `upload_model(model_id=..., from_job_id=...)`.
 4. Poll `get_model_upload_status` until `validated`, call `set_auto_submit(model_id=..., enabled=True)`, and verify `lane_active: true` in `list_models`.
 
 **Manual Futures Submission Fallback:**
 
-1. Run `validate_futures_submission(predictions=...)` first (read-only, checks universe coverage and `[0, 1]` finiteness).
-2. Call `submit_futures_predictions(model_id=..., predictions=...)` (omit `exped` to auto-resolve the open round; never pass `"current"`).
+1. Run `validate_futures_submission(predictions=...)` or `validate_futures_submission(predictions_path="live_preds.parquet")` first (read-only, checks universe coverage and `[0, 1]` finiteness).
+2. Call `submit_futures_predictions(model_id=..., predictions=...)` (or `predictions_path=...`, optional `data_datestamp=...`; omit `exped` to auto-resolve the open round; never pass `"current"`).
 
 **Hackathon Event Loop:**
 
@@ -340,7 +340,7 @@ Staking and withdrawal tools sit in the `staking` toolset and stay hidden until 
 }
 ```
 
-- **Audit first:** Run the `review_staking` prompt (`get_profile` for `email_verified_at`, `get_wallet_status` for 24 h withdrawal cooling, `get_staking_vault`, `get_forwarder_balance`, `list_unconfirmed_writes`).
+- **Audit first:** Run the `review_staking` prompt (`get_profile` for `email_verified_at`, `get_wallet_status` for 24 h withdrawal cooling, `get_staking_strategy`, `get_staking_plans`, `get_staking_positions`, `list_unconfirmed_writes`), then configure per-model plans (`constant` or `compound`) via `set_staking_plan`.
 - **Exact money types:** Always pass USDC as a decimal string (`"25.5"`) or integer micro-USDC (`amount_micro=25_500_000`). Binary floats are rejected locally before touching the network.
 - **Mandatory confirmation & SQLite journal:** Every staking/allocation/claim/withdrawal asks for human confirmation via MCP Elicitation (or LangGraph `interrupt()`). Withdrawal and destructive confirmations (`withdraw_usdc`, `freeze_withdrawals`, `archive_model`, `revoke_api_key`, `delete_diagnostics_run`) cannot be skipped even if `EVERESTEER_CONFIRM=none`.
 
@@ -474,10 +474,10 @@ Choose toolsets with `EVERESTEER_TOOLSETS`: `auto` (default), `all`, comma-separ
 | `compete` *(auto)* | Read: key<br/>Write: `ALLOW_WRITES`<br/>Delete: `ALLOW_WITHDRAWALS` | `validate_futures_submission`, `get_submission_status`, `get_scores`, `get_leaderboard`, `get_validation_panel`, `get_diagnostics`, `get_daily_progression`, `get_diagnostics_run`, `get_upload_progress`, `get_diagnostics_leaderboard`, `get_diagnostics_standings`, `get_final_selection`, `submit_futures_predictions`, `submit_futures_predictions_batch`, `submit_validation_diagnostics`, `submit_diagnostics_batch`, `submit_event_predictions`, `cancel_diagnostics_run`, `delete_diagnostics_run`, `set_final_selection` |
 | `compute` *(auto)* | Read + dry-run: key<br/>Launch/Cancel: `ALLOW_WRITES` | `list_model_templates`, `get_compute_credits`, `list_compute_jobs`, `get_job_status`, `get_job_log`, `get_job_artifact_urls`, `download_job_artifact`, `price_training_job`, `train_model`, `cancel_compute_job` |
 | `account` *(auto)* | Read: key<br/>Write: `ALLOW_WRITES`<br/>Revoke/Freeze: `ALLOW_WITHDRAWALS` | `get_profile`, `get_notifications`, `get_badges`, `list_api_keys`, `register_agent`, `rename_agent`, `resend_email_verification`, `mark_notifications_read`, `create_api_key`, `revoke_api_key`, `freeze_withdrawals` |
-| `staking` *(auto when staking/withdrawals enabled, or `+staking`)* | Read: key<br/>Staking: `ALLOW_STAKING`<br/>Withdraw: `ALLOW_WITHDRAWALS` | `get_stake_balance`, `get_staking_history`, `get_deposit_address`, `get_forwarder_balance`, `get_staking_vault`, `get_wallet_status`, `get_event_staking`, `list_unconfirmed_writes`, `stake_on_model`, `confirm_stake`, `unstake_from_model`, `claim_payout`, `relay_stake`, `relay_claim`, `build_vault_config_tx`, `set_stake_allocation`, `withdraw_stake_allocation`, `withdraw_usdc` |
+| `staking` *(auto when staking/withdrawals enabled, or `+staking`)* | Read: key<br/>Staking: `ALLOW_STAKING`<br/>Withdraw: `ALLOW_WITHDRAWALS` | `get_stake_balance`, `get_staking_history`, `get_staking_strategy`, `get_staking_plans`, `get_staking_positions`, `get_wallet_status`, `get_event_staking`, `list_unconfirmed_writes`, `stake_on_model`, `confirm_stake`, `unstake_from_model`, `claim_payout`, `relay_stake`, `relay_claim`, `set_staking_plan`, `set_stake_allocation`, `withdraw_stake_allocation`, `withdraw_usdc` |
 | `equities` *(`+equities`)* | Read: key<br/>Write: `ALLOW_WRITES` | `get_equities_universe`, `get_equities_features`, `submit_equities_predictions`, `submit_equities_predictions_file` |
 
-**MCP Resources:** `everesteer://capabilities`, `everesteer://scoring`, `everesteer://rounds/current`, `everesteer://models`, and `everesteer://docs/{topic}` (`scoring`, `submission-contract`, `hackathon-vs-tournament`, `staking-safety`).
+**MCP Resources:** `everesteer://capabilities`, `everesteer://scoring`, `everesteer://rounds/current`, and `everesteer://models`.
 
 **MCP Prompts:** `orient_and_plan`, `validate_and_submit`, `diagnose_model`, `review_staking`.
 

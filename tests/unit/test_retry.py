@@ -11,6 +11,7 @@ from mcp_server_everesteer.errors import (
     CloudflareAccessError,
     EmailVerificationRequired,
     EveresteerError,
+    NotFound,
     NotSent,
     PermissionDenied,
     RateLimited,
@@ -83,6 +84,8 @@ async def test_cloudflare_html_and_email_verification_errors(
     authed_settings: Settings, api: FakeApi
 ) -> None:
     api.add(ep.GET_STARTED, (200, "<html><title>Cloudflare Access</title></html>"))
+    api.add(ep.STATUS, (403, "<html><title>Cloudflare Access</title></html>"))
+    api.add(ep.ROUNDS, (404, "<html><body>404 Not Found</body></html>"))
     api.add(ep.STAKING_STAKE, (403, {"code": "email_verification_required", "detail": "verify"}))
     api.add(ep.AGENT_PROFILE, (401, {"detail": "invalid key"}))
     api.add(ep.BENCHMARKS, (403, {"detail": "hackathon key"}))
@@ -91,6 +94,10 @@ async def test_cloudflare_html_and_email_verification_errors(
     try:
         with pytest.raises(CloudflareAccessError):
             await client.json(ep.GET_STARTED)
+        with pytest.raises(CloudflareAccessError):
+            await client.json(ep.STATUS)
+        with pytest.raises(NotFound):
+            await client.json(ep.ROUNDS)
         with pytest.raises(EmailVerificationRequired):
             await client.json(ep.STAKING_STAKE, body={})
         with pytest.raises(AuthError):

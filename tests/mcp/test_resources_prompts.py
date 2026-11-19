@@ -1,11 +1,10 @@
-"""MCP tests for resources and workflow prompts."""
+"""MCP tests for live resources and workflow prompts."""
 
 import json
 
 import pytest
 from mcp.types import TextContent, TextResourceContents
 
-from mcp_server_everesteer import knowledge
 from mcp_server_everesteer.client import endpoints as ep
 from mcp_server_everesteer.config import Settings
 from tests.conftest import FakeApi
@@ -22,12 +21,12 @@ async def test_resources_and_docs(authed_settings: Settings, api: FakeApi) -> No
 
     async with session(authed_settings, api) as client:
         listed = {str(r.uri) for r in (await client.list_resources()).resources}
-        for topic in knowledge.TOPICS:
-            assert f"everesteer://docs/{topic}" in listed
-            doc = await client.read_resource(f"everesteer://docs/{topic}")
-            content = doc.contents[0]
-            assert isinstance(content, TextResourceContents)
-            assert len(content.text) > 50
+        assert listed == {
+            "everesteer://capabilities",
+            "everesteer://scoring",
+            "everesteer://rounds/current",
+            "everesteer://models",
+        }
 
         for uri, key in (
             ("everesteer://capabilities", "mcp"),

@@ -221,7 +221,39 @@ async def download_dataset(
     ] = None,
     version: Annotated[str, Field(description="Dataset version or 'latest'.")] = "latest",
 ) -> DownloadResult:
-    """Download a dataset split parquet locally via the credential-free presigned CDN lane."""
+    """Download a dataset split parquet (or `split='bulk'` zip bundle) via presigned CDN."""
+    if split == "bulk":
+        resolved = (
+            await _current_version(call, universe) if version in ("latest", "current") else version
+        )
+        dest = output_path or f"{universe}_bulk.zip"
+        try:
+            saved_path, size = await call.client.download_presigned(
+                ep.DATA_DOWNLOAD_BULK,
+                dest,
+                path_args={"version": resolved, "universe_id": universe},
+                deadline=call.deadline,
+            )
+        except NotFound:
+            current = await _current_version(call, universe)
+            if current == resolved:
+                raise
+            resolved = current
+            saved_path, size = await call.client.download_presigned(
+                ep.DATA_DOWNLOAD_BULK,
+                dest,
+                path_args={"version": resolved, "universe_id": universe},
+                deadline=call.deadline,
+            )
+        return DownloadResult(
+            path=saved_path,
+            bytes_written=size,
+            universe=universe,
+            split="bulk",
+            version=resolved,
+            artifact="bulk_zip",
+        )
+
     dest = output_path or f"{universe}_{split}.parquet"
     if universe == "futures":
         saved_path, size = await call.client.download_presigned(

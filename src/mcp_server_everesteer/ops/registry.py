@@ -42,7 +42,9 @@ Split = Annotated[
     str,
     Field(
         min_length=1,
-        description="Dataset split: 'train', 'validation', 'live', or 'train_benchmark_models'.",
+        description=(
+            "Dataset split: 'train', 'validation', 'live', 'bulk', or 'train_benchmark_models'."
+        ),
     ),
 ]
 

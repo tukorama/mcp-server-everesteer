@@ -21,7 +21,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import interrupt
 from pydantic import BaseModel, create_model
 
-from mcp_server_everesteer import diagrams, knowledge
+from mcp_server_everesteer import diagrams, prompts
 from mcp_server_everesteer.capabilities import Capabilities
 from mcp_server_everesteer.config import Settings
 from mcp_server_everesteer.errors import EveresteerError
@@ -41,7 +41,7 @@ T = TypeVar("T")
 
 def agent_prompt(caps: Capabilities) -> str:
     """Return the dynamic Everesteer system prompt matching ``caps``."""
-    return knowledge.agent_guide(caps.toolsets, gates=caps.gates)
+    return prompts.agent_guide(caps.toolsets, gates=caps.gates)
 
 
 class _Bridge:

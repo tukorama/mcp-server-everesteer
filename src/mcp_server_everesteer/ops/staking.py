@@ -1,4 +1,4 @@
-"""USDC staking, CREATE2 forwarder, agent-owned vaults, event allocations, and withdrawals."""
+"""USDC staking, Strategy contracts, per-model stake plans, event allocations, and withdrawals."""
 
 import uuid
 from typing import Annotated, Any, Literal
@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field
 
 from mcp_server_everesteer.client import endpoints as ep
+from mcp_server_everesteer.errors import InvalidRequest
 from mcp_server_everesteer.models import (
     ApiPayload,
     UnconfirmedWriteEntry,
@@ -64,28 +65,22 @@ async def get_staking_history(call: Call, model_id: ModelId) -> ApiPayload:
     )
 
 
-@operation("Get CREATE2 deposit address", toolset="staking", requires=("api_key",), read_only=True)
-async def get_deposit_address(call: Call) -> ApiPayload:
-    """Get your deterministic CREATE2 USDC forwarder deposit address."""
-    return ApiPayload.from_raw(await call.json(ep.STAKING_DEPOSIT_ADDRESS))
+@operation("Get staking strategy status", toolset="staking", requires=("api_key",), read_only=True)
+async def get_staking_strategy(call: Call) -> ApiPayload:
+    """Inspect your linked wallet's personal staking Strategy contract, balances, and caps."""
+    return ApiPayload.from_raw(await call.json(ep.STAKING_STRATEGY))
 
 
-@operation("Get forwarder balance", toolset="staking", requires=("api_key",), read_only=True)
-async def get_forwarder_balance(call: Call) -> ApiPayload:
-    """Read spendable USDC sitting on your CREATE2 forwarder contract."""
-    return ApiPayload.from_raw(await call.json(ep.STAKING_FORWARDER_BALANCE))
+@operation("List model stake plans", toolset="staking", requires=("api_key",), read_only=True)
+async def get_staking_plans(call: Call) -> ApiPayload:
+    """List your active and configured per-model Staking v2 plans."""
+    return ApiPayload.from_raw(await call.json(ep.STAKING_PLANS))
 
 
-@operation("Get staking vault status", toolset="staking", requires=("api_key",), read_only=True)
-async def get_staking_vault(
-    call: Call,
-    models: Annotated[
-        list[str] | None, Field(description="Optional model ids whose on-chain policy to inspect.")
-    ] = None,
-) -> ApiPayload:
-    """Inspect your deterministic vault address, balance, and whether automation is enabled."""
-    params = {"models": ",".join(models)} if models else None
-    return ApiPayload.from_raw(await call.json(ep.STAKING_VAULT, params=params))
+@operation("List staking positions", toolset="staking", requires=("api_key",), read_only=True)
+async def get_staking_positions(call: Call) -> ApiPayload:
+    """List active and unresolved Staking v2 round positions across your models."""
+    return ApiPayload.from_raw(await call.json(ep.STAKING_POSITIONS))
 
 
 @operation("Get wallet & cooling status", toolset="staking", requires=("api_key",), read_only=True)
@@ -288,53 +283,133 @@ async def relay_claim(call: Call, round_id: Annotated[int, Field(ge=1)]) -> Writ
     return unknown or WriteResult.from_raw(data, status="ok", message="Claim relayed.")
 
 
-async def _describe_vault_tx(
+def _resolve_plan_amounts(
+    *,
+    commitment_micro: int | None,
+    commitment_usdc: str | int | None,
+    per_round_stake_micro: int | None,
+    per_round_stake_usdc: str | int | None,
+    enabled: bool,
+) -> tuple[int | None, int | None, int]:
+    c_micro = (
+        resolve_usdc_micro(amount_micro=commitment_micro, amount_usdc=commitment_usdc)
+        if commitment_micro is not None or commitment_usdc is not None
+        else None
+    )
+    s_micro = (
+        resolve_usdc_micro(amount_micro=per_round_stake_micro, amount_usdc=per_round_stake_usdc)
+        if per_round_stake_micro is not None or per_round_stake_usdc is not None
+        else None
+    )
+    if c_micro is not None and s_micro is not None:
+        raise InvalidRequest(
+            "Pass either commitment (`commitment_micro`/`commitment_usdc`) or per-round stake "
+            + "(`per_round_stake_micro`/`per_round_stake_usdc`), not both."
+        )
+    if enabled and c_micro is None and s_micro is None:
+        raise InvalidRequest(
+            "Enabling a stake plan requires commitment (`commitment_usdc`/`commitment_micro`) "
+            + "or per-round stake (`per_round_stake_usdc`/`per_round_stake_micro`)."
+        )
+    return c_micro, s_micro, c_micro or s_micro or 0
+
+
+async def _describe_staking_plan(
     _call: Call,
     model_id: str,
-    per_round_stake_usdc: str | int,
     mode: str = "compound",
     enabled: bool = True,
+    commitment_micro: int | None = None,
+    commitment_usdc: str | int | None = None,
+    per_round_stake_micro: int | None = None,
+    per_round_stake_usdc: str | int | None = None,
 ) -> str:
-    micro = parse_usdc_to_micro(per_round_stake_usdc)
-    return (
-        f"Build unsigned vault config calldata for model '{clean_label(model_id)}' "
-        f"({format_micro_usdc(micro)} USDC/round, mode={mode}, enabled={enabled})?"
+    c_micro, s_micro, _ = _resolve_plan_amounts(
+        commitment_micro=commitment_micro,
+        commitment_usdc=commitment_usdc,
+        per_round_stake_micro=per_round_stake_micro,
+        per_round_stake_usdc=per_round_stake_usdc,
+        enabled=enabled,
     )
+    label = clean_label(model_id)
+    if c_micro is not None:
+        detail = f"{format_micro_usdc(c_micro)} USDC total commitment"
+    elif s_micro is not None:
+        detail = f"{format_micro_usdc(s_micro)} USDC/round"
+    else:
+        detail = "0 USDC (disable)"
+    action = "Enable" if enabled else "Disable"
+    return f"{action} staking plan for model '{label}' ({detail}, mode={mode})?"
 
 
 @operation(
-    "Build vault config transaction",
+    "Configure model stake plan",
     toolset="staking",
     requires=("api_key",),
     gate="staking",
-    describe=_describe_vault_tx,
+    idempotent=True,
+    describe=_describe_staking_plan,
 )
-async def build_vault_config_tx(
+async def set_staking_plan(
     call: Call,
     model_id: ModelId,
-    per_round_stake_usdc: UsdcAmount,
-    mode: Literal["compound", "constant"] = "compound",
+    mode: Literal["constant", "compound"] = "compound",
     enabled: bool = True,
+    commitment_micro: Annotated[
+        int | None,
+        Field(gt=0, description="Total commitment in micro-USDC (spread across active ladder)."),
+    ] = None,
+    commitment_usdc: Annotated[
+        str | int | None,
+        Field(description="Total commitment in USDC as string (e.g. '250') or integer."),
+    ] = None,
+    per_round_stake_micro: Annotated[
+        int | None,
+        Field(gt=0, description="Exact per-round stake in micro-USDC (alternative to commitment)."),
+    ] = None,
+    per_round_stake_usdc: Annotated[
+        str | int | None,
+        Field(description="Exact per-round stake in USDC as string (e.g. '15') or integer."),
+    ] = None,
 ) -> WriteResult:
-    """Build UNSIGNED `setModelConfig` calldata for your owner wallet to sign and broadcast."""
-    micro = parse_usdc_to_micro(per_round_stake_usdc)
-    usd = micro_to_decimal(micro)
-    check_usdc_limit(
-        call.settings.max_stake_usdc, usd, "Per-round vault stake", "EVERESTEER_MAX_STAKE_USDC"
+    """Create or update a per-model Staking v2 plan (`constant` or `compound`)."""
+    c_micro, s_micro, effective_micro = _resolve_plan_amounts(
+        commitment_micro=commitment_micro,
+        commitment_usdc=commitment_usdc,
+        per_round_stake_micro=per_round_stake_micro,
+        per_round_stake_usdc=per_round_stake_usdc,
+        enabled=enabled,
     )
-    res = await call.json(
-        ep.STAKING_VAULT_CONFIG_TX,
-        body={
-            "model_id": model_id,
-            "per_round_stake_usdc": float(usd),
-            "mode": mode,
-            "enabled": enabled,
-        },
+    usd = micro_to_decimal(effective_micro)
+    if effective_micro > 0:
+        check_usdc_limit(
+            call.settings.max_stake_usdc, usd, "Stake plan", "EVERESTEER_MAX_STAKE_USDC"
+        )
+        check_daily_usdc(call, usd, "staking")
+
+    body: dict[str, Any] = {"mode": mode, "enabled": enabled}
+    if c_micro is not None:
+        body["commitment_micro"] = c_micro
+    if s_micro is not None:
+        body["per_round_stake_micro"] = s_micro
+
+    summary = (
+        f"plan {model_id} enabled={enabled} mode={mode} ({format_micro_usdc(effective_micro)} USDC)"
     )
-    return WriteResult.from_raw(
-        res,
-        status="ok",
-        message="Unsigned vault config built. Sign and submit from your verified owner wallet.",
+    data, unknown = await send_journaled_write(
+        call,
+        tool_key="staking:set_staking_plan",
+        endpoint=ep.STAKING_PLAN_SET,
+        path_args={"model_id": model_id},
+        summary=summary,
+        usdc=usd,
+        print_=fingerprint("staking:plan", model_id, mode, enabled, c_micro, s_micro),
+        body=body,
+    )
+    return unknown or WriteResult.from_raw(
+        data,
+        status="accepted" if enabled else "ok",
+        message=f"Stake plan updated for model '{model_id}'.",
     )
 
 

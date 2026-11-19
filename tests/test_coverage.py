@@ -35,7 +35,6 @@ _MODULE_LAYER: dict[str, int] = {
     "client": 2,
     "safety": 2,
     "ops": 3,
-    "knowledge": 4,
     "diagrams": 4,
     "prompts": 4,
     "resources": 4,

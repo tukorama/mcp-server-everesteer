@@ -20,7 +20,7 @@ Never pass USDC amounts as binary IEEE-754 floats inside financial tools.
 Mutating capability is controlled by three independent boolean flags, all defaulting to `False`:
 
 1. `EVERESTEER_ALLOW_WRITES=true` — model slots, prediction submissions, practice diagnostics, hosted compute launches, account updates.
-2. `EVERESTEER_ALLOW_STAKING=true` — staking, allocations, claims, vault calldata configuration.
+2. `EVERESTEER_ALLOW_STAKING=true` — staking, per-model stake plans, claims, event allocations.
 3. `EVERESTEER_ALLOW_WITHDRAWALS=true` — on-chain USDC withdrawals and destructive/emergency actions (`withdraw_usdc`, `freeze_withdrawals`, `archive_model`, `revoke_api_key`, `delete_diagnostics_run`).
 
 A cloned repository may contain an adversarial `.env` file. `_NOT_FROM_DOTENV` in [config.py](../src/mcp_server_everesteer/config.py) strips secrets, URLs, file paths, limits, bearer tokens, and all three gates from workspace `.env` sources so they can only come from the real process environment.

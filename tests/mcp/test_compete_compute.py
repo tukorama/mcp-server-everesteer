@@ -58,6 +58,7 @@ async def test_compete_reads_submissions_and_diagnostics(
             "model_pkl": {"method": "POST", "url": s3_post, "fields": {"key": "m"}},
         },
         (404, {"detail": "no presign"}),
+        (404, {"detail": "No model 'missing'. Create it first with create_model."}),
     )
     api.add(ep.DIAGNOSTICS_COMPLETE, {"upload_id": "diag-1", "status": "pending"})
     api.add(ep.DIAGNOSTICS_UPLOAD, {"upload_id": "diag-2", "status": "pending"})
@@ -83,8 +84,17 @@ async def test_compete_reads_submissions_and_diagnostics(
 
     async with session(authed_settings, api, elicitation_callback=accept) as client:
         assert (await call(client, "validate_futures_submission", predictions={"ES": 0.5}))["valid"]
+        preds_csv = tmp_path / "preds.csv"
+        preds_csv.write_text("id,prediction\nES,0.5\n", encoding="utf-8")
+        assert (await call(client, "validate_futures_submission", predictions_path=str(preds_csv)))[
+            "valid"
+        ]
         sub = await call(
-            client, "submit_futures_predictions", model_id="m1", predictions={"ES": 0.6}
+            client,
+            "submit_futures_predictions",
+            model_id="m1",
+            predictions={"ES": 0.6},
+            data_datestamp=20261119,
         )
         assert sub["data"]["submission_id"] == "sub-1"
 
@@ -179,6 +189,10 @@ async def test_compete_reads_submissions_and_diagnostics(
             client, "submit_event_predictions", model_id="m1", file_path=str(preds_file)
         )
         assert evt2["data"]["upload_id"] == "evt-2"
+        # Model-not-found 404 on diagnostics presign surfaces directly without multipart fallback
+        await error(
+            client, "submit_validation_diagnostics", model_id="missing", file_path=str(preds_file)
+        )
 
 
 async def test_compute_pricing_training_wait_cap_and_artifacts(
@@ -235,10 +249,19 @@ async def test_compute_pricing_training_wait_cap_and_artifacts(
         )
         assert dl2["bytes_written"] == len(b"OUTPUT_TXT")
 
-        # Dry-run preview requires no confirmation
-        preview = await call(client, "price_training_job", model="lightgbm", gpu="CPU")
+        # Dry-run preview requires no confirmation (including T4 tier & deploy_to_model_id)
+        preview = await call(client, "price_training_job", model="lightgbm", gpu="T4")
         assert preview["status"] == "preview"
         assert preview["dry_run"] is True
+        dry_deploy = await call(
+            client,
+            "train_model",
+            model="lightgbm",
+            gpu="T4",
+            deploy_to_model_id="m1",
+            dry_run=True,
+        )
+        assert dry_deploy["dry_run"] is True
 
         # Wait capped at 45s returns clean `pending` status instead of hanging
         pending = await call(

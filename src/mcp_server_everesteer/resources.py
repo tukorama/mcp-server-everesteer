@@ -1,32 +1,16 @@
-"""MCP resources exposing packaged guides and live Everesteer state."""
+"""MCP resources exposing live Everesteer state."""
 
 from collections.abc import Callable
 
 from mcp.server import MCPServer
 
-from mcp_server_everesteer import knowledge
 from mcp_server_everesteer.ops.core import explain_scoring, get_capabilities, get_rounds
 from mcp_server_everesteer.ops.models_api import list_models
 from mcp_server_everesteer.ops.registry import Call, Runtime
 
 
-def _add_doc(server: MCPServer, topic: str) -> None:
-    def read_doc() -> str:
-        return knowledge.read(topic)
-
-    read_doc.__name__ = f"doc_{topic.replace('-', '_')}"
-    server.resource(
-        f"everesteer://docs/{topic}",
-        name=topic,
-        description=f"Everesteer guide: {topic.replace('-', ' ')}.",
-        mime_type="text/markdown",
-    )(read_doc)
-
-
 def register_resources(server: MCPServer, runtime: Callable[[], Runtime]) -> None:
-    """Register markdown reference docs and live JSON resources."""
-    for topic in knowledge.TOPICS:
-        _add_doc(server, topic)
+    """Register live read-only JSON resources."""
 
     @server.resource(
         "everesteer://capabilities",

@@ -1,15 +1,82 @@
 """Submissions, validation diagnostics, event rounds, leaderboards, and scores."""
 
+import csv
+import importlib
+import json
+from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 from pydantic import Field
 
 from mcp_server_everesteer.client import endpoints as ep
-from mcp_server_everesteer.errors import InvalidRequest, NotFound, ServerError
+from mcp_server_everesteer.errors import EveresteerError, InvalidRequest, NotFound, ServerError
 from mcp_server_everesteer.models import ApiPayload, BatchResult, WriteResult, as_dict, as_list
 from mcp_server_everesteer.ops.registry import Call, ModelId, Tournament, UploadId, operation
 from mcp_server_everesteer.redaction import clean_label
 from mcp_server_everesteer.safety import check_prediction_range
+
+
+def _is_model_not_found(exc: EveresteerError) -> bool:
+    low = str(exc).lower()
+    return "no model" in low or "create_model" in low or "model not found" in low
+
+
+def _rows_to_predictions(rows: list[dict[str, Any]], source: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for row in rows:
+        iid = row.get("instrument_id") if "instrument_id" in row else row.get("id")
+        pred = row.get("prediction") if "prediction" in row else row.get("score")
+        if iid is None or pred is None:
+            raise InvalidRequest(
+                f"Rows in {source} must contain `id`/`instrument_id` and `prediction` columns."
+            )
+        out[str(iid)] = float(pred)
+    if not out:
+        raise InvalidRequest(f"No predictions found in {source}.")
+    return out
+
+
+def _read_predictions_file(path_str: str) -> dict[str, float]:
+    path = Path(path_str)
+    if not path.is_file():
+        raise InvalidRequest(f"Predictions file not found: {path_str}")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        loaded: Any = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            loaded_d = cast(dict[Any, Any], loaded)
+            return {str(k): float(v) for k, v in loaded_d.items()}
+        if isinstance(loaded, list):
+            items = cast(list[Any], loaded)
+            return _rows_to_predictions([as_dict(item) for item in items], path_str)
+        raise InvalidRequest(f"JSON predictions in {path_str} must be an object or list of rows.")
+    if suffix == ".csv":
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows = [dict(row) for row in csv.DictReader(handle)]
+        return _rows_to_predictions(rows, path_str)
+    if suffix in (".parquet", ".pq"):
+        try:
+            pq = importlib.import_module("pyarrow.parquet")
+        except ImportError as exc:
+            raise InvalidRequest(
+                "Reading .parquet predictions requires `pyarrow` in this Python environment."
+            ) from exc
+        rows = cast(list[dict[str, Any]], cast(Any, pq).read_table(path).to_pylist())
+        return _rows_to_predictions(rows, path_str)
+    raise InvalidRequest(
+        f"Unsupported predictions file extension '{path.suffix}'. Use .json, .csv, or .parquet."
+    )
+
+
+def _load_predictions_source(
+    predictions: dict[str, float] | None, predictions_path: str | None
+) -> dict[str, float]:
+    if (predictions is None) == (predictions_path is None):
+        raise InvalidRequest("Provide exactly one of `predictions` or `predictions_path`.")
+    if predictions_path is not None:
+        return _read_predictions_file(predictions_path)
+    return cast(dict[str, float], predictions)
+
 
 # -- Read Operations ---------------------------------------------------------
 
@@ -20,15 +87,20 @@ from mcp_server_everesteer.safety import check_prediction_range
 async def validate_futures_submission(
     call: Call,
     predictions: Annotated[
-        dict[str, float],
+        dict[str, float] | None,
         Field(description="Mapping of instrument_id -> prediction in [0, 1]."),
-    ],
+    ] = None,
+    predictions_path: Annotated[
+        str | None,
+        Field(description="Local .parquet, .csv, or .json predictions file path."),
+    ] = None,
     exped: Annotated[
         str | None, Field(description="Target exped; omit to validate against the open round.")
     ] = None,
 ) -> ApiPayload:
     """Validate coverage, finiteness, and [0, 1] bounds server-side without writing anything."""
-    body: dict[str, Any] = {"predictions": predictions}
+    resolved = _load_predictions_source(predictions, predictions_path)
+    body: dict[str, Any] = {"predictions": resolved}
     if exped is not None:
         body["exped"] = exped
     return ApiPayload.from_raw(await call.json(ep.FUTURES_VALIDATE, body=body))
@@ -308,27 +380,36 @@ async def submit_futures_predictions(
     call: Call,
     model_id: ModelId,
     predictions: Annotated[
-        dict[str, float],
+        dict[str, float] | None,
         Field(description="Mapping of {instrument_id: prediction in [0, 1]} covering universe."),
-    ],
+    ] = None,
+    predictions_path: Annotated[
+        str | None,
+        Field(description="Local .parquet, .csv, or .json predictions file path."),
+    ] = None,
     exped: Annotated[
         str | None,
         Field(description="Literal open-round exped; omit to auto-resolve (never pass 'current')."),
     ] = None,
+    data_datestamp: Annotated[
+        int | None,
+        Field(description="Optional YYYYMMDD data snapshot identifier for reproducibility."),
+    ] = None,
 ) -> WriteResult:
     """Submit Himalayas futures predictions (safe to re-submit while round window is open)."""
-    check_prediction_range(predictions, lo=0.0, hi=1.0)
+    preds = _load_predictions_source(predictions, predictions_path)
+    check_prediction_range(preds, lo=0.0, hi=1.0)
     resolved_exped = exped
     if resolved_exped is None:
         info = as_dict(await call.json(ep.FUTURES_CURRENT_INSTRUMENTS))
         resolved_exped = str(info["exped"])
-    body = {
+    body: dict[str, Any] = {
         "model_id": model_id,
         "exped": resolved_exped,
-        "predictions": [
-            {"instrument_id": iid, "prediction": pred} for iid, pred in predictions.items()
-        ],
+        "predictions": [{"instrument_id": iid, "prediction": pred} for iid, pred in preds.items()],
     }
+    if data_datestamp is not None:
+        body["data_datestamp"] = data_datestamp
     res = await call.json(ep.FUTURES_SUBMIT_V2, body=body)
     return WriteResult.from_raw(res, status="ok", message="Futures predictions submitted.")
 
@@ -347,7 +428,9 @@ async def submit_futures_predictions_batch(
         Field(
             min_length=1,
             max_length=25,
-            description="1-25 items, each {model_id, predictions, exped?}.",
+            description=(
+                "1-25 items: {model_id, predictions|predictions_path, exped?, data_datestamp?}."
+            ),
         ),
     ],
     exped: Annotated[
@@ -365,16 +448,18 @@ async def submit_futures_predictions_batch(
     for idx, item in enumerate(items):
         mid = str(item.get("model_id") or "")
         try:
-            preds: dict[str, float] = item["predictions"]
+            preds = _load_predictions_source(item.get("predictions"), item.get("predictions_path"))
             check_prediction_range(preds, lo=0.0, hi=1.0)
             target_exped = str(item.get("exped") or default_exped or "")
-            body = {
+            body: dict[str, Any] = {
                 "model_id": mid,
                 "exped": target_exped,
                 "predictions": [
                     {"instrument_id": iid, "prediction": pred} for iid, pred in preds.items()
                 ],
             }
+            if item.get("data_datestamp") is not None:
+                body["data_datestamp"] = int(item["data_datestamp"])
             outcome = await call.json(ep.FUTURES_SUBMIT_V2, body=body)
             item_res = as_dict(outcome) if isinstance(outcome, dict) else {"result": outcome}
             results.append({"index": idx, "model_id": mid, **item_res})
@@ -504,7 +589,9 @@ async def _upload_diagnostics_lane(
 
     try:
         presign = await call.json(presign_ep, body=presign_body)
-    except NotFound:
+    except NotFound as exc:
+        if _is_model_not_found(exc):
+            raise
         presign = None
 
     presign_d = as_dict(presign)

@@ -133,6 +133,20 @@ def _looks_like_cloudflare_html(text: str) -> bool:
     )
 
 
+def _is_cloudflare_access_challenge(status: int, text: str, headers: httpx2.Headers) -> bool:
+    if status not in (301, 302, 303, 307, 308, 401, 403):
+        return False
+    low = text.lower()
+    loc = headers.get("location", "").lower()
+    return (
+        "cloudflare access" in low
+        or "cdn-cgi/access" in low
+        or "cdn-cgi/access" in loc
+        or "cf-access" in low
+        or "accessdenied" in low
+    )
+
+
 class EveresteerClient:
     """Async Everesteer API v1 client with safe retries, CF Access awareness, and S3 lanes."""
 
@@ -331,7 +345,7 @@ class EveresteerClient:
         status = response.status_code
         body = parse_json(response)
         text = response.text or ""
-        if body is None and _looks_like_cloudflare_html(text):
+        if body is None and _is_cloudflare_access_challenge(status, text, response.headers):
             raise CloudflareAccessError(
                 f"{label} received an HTML challenge instead of API JSON "
                 + f"(host: {self.settings.resolved_base_url}).",

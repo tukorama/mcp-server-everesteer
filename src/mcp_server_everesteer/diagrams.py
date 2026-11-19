@@ -29,8 +29,8 @@ _C4_ARCHITECTURE = (
     "            direction LR\n"
     '            ops_eng["Operations & Capabilities<br/>[Component: ops/ + capabilities.py]<br/>'
     '6 toolsets · 3 gates · 45s wait cap · progress"]\n'
-    '            know["Knowledge & Prompts<br/>[Component: knowledge/ + resources]<br/>'
-    'everesteer://docs/* · dynamic AGENT_GUIDE"]\n'
+    '            know["Prompts & Live Resources<br/>[Component: prompts.py + resources.py]<br/>'
+    'everesteer://* · dynamic AGENT_GUIDE"]\n'
     "        end\n"
     "\n"
     '        subgraph c_guard["Safety, Models & State"]\n'
@@ -101,7 +101,7 @@ _LIFECYCLE = (
     '    t_pkl --> t_track["get_submission_status<br/>'
     '→ get_daily_progression (T+1..T+20)<br/>→ get_scores"]\n'
     "    t_man --> t_track\n"
-    '    t_track --> t_stake["Optional: Staking / Vault<br/>(ALLOW_STAKING=true)"]\n'
+    '    t_track --> t_stake["Optional: Strategy / Stake Plans<br/>(ALLOW_STAKING=true)"]\n'
     "\n"
     '    mode -- "Hackathon Event" --> h_data["download_dataset<br/>'
     'train (labeled) + live/val (blank)"]\n'

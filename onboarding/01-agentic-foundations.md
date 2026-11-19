@@ -22,10 +22,10 @@ When an MCP host (such as Claude Code, Cursor, Claude Desktop, or VS Code) conne
 | Primitive | Who Triggers It | Purpose in This Repo | Source File |
 |---|---|---|---|
 | **Tools** | The LLM | Executable actions with typed Pydantic input schemas and `ToolAnnotations` (`read_only_hint`, `destructive_hint`, `idempotent_hint`) | [tools.py](../src/mcp_server_everesteer/tools.py) |
-| **Resources** | Application or LLM read | On-demand reference guides (`everesteer://docs/*`) and live read-only JSON snapshots (`everesteer://scoring`, `everesteer://capabilities`, `everesteer://rounds/current`, `everesteer://models`) | [resources.py](../src/mcp_server_everesteer/resources.py) |
+| **Resources** | Application or LLM read | Live read-only JSON snapshots (`everesteer://scoring`, `everesteer://capabilities`, `everesteer://rounds/current`, `everesteer://models`) | [resources.py](../src/mcp_server_everesteer/resources.py) |
 | **Prompts** | Human user / client workflow | Reusable multi-step audit checklists (`orient_and_plan`, `validate_and_submit`, `diagnose_model`, `review_staking`) | [prompts.py](../src/mcp_server_everesteer/prompts.py) |
 
-Keeping multi-page rules in `everesteer://docs/*` instead of repeating them inside every tool docstring keeps the model's context budget sharp and focused.
+Keeping multi-page rules in live `everesteer://*` resources and concise prompts instead of repeating them inside every tool docstring keeps the model's context budget sharp and focused.
 
 ---
 

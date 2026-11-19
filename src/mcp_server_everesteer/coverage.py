@@ -5,6 +5,24 @@ SUPERSEDED = {
     "POST /api/v1/futures/submit": (
         "Legacy per-target submission format superseded by POST /api/v1/futures/submit/v2"
     ),
+    "GET /api/v1/staking/deposit-address": (
+        "Retired CREATE2 forwarder path (410 Gone); superseded by GET /api/v1/staking/strategy"
+    ),
+    "GET /api/v1/staking/forwarder-balance": (
+        "Retired CREATE2 forwarder path (410 Gone); superseded by GET /api/v1/staking/strategy"
+    ),
+    "GET /api/v1/staking/vault": (
+        "Retired vault path (410 forwarder_path_retired); superseded by staking strategy"
+    ),
+    "POST /api/v1/staking/vault/config-tx": (
+        "Superseded by per-model stake plans (PUT /api/v1/staking/plan/{model_id})"
+    ),
+    "PUT /api/v1/models/{model_id}/auto-stake": (
+        "Moved (410) to PUT /api/v1/staking/plan/{model_id}"
+    ),
+    "DELETE /api/v1/models/{model_id}": (
+        "Alias for POST /api/v1/models/{model_id}/archive (archive_model)"
+    ),
 }
 
 # Routes deliberately excluded from the MCP/LangGraph control-plane surface.
@@ -25,7 +43,7 @@ EXCLUDED_SDK_FEATURES = {
         "Local numpy/pandas/scipy evaluation belongs in the agent's Python workspace."
     ),
     "everestapi.scoring": (
-        "Local numpy/pandas/scipy scoring engine; server rules live in everesteer://docs/scoring."
+        "Local numpy/pandas/scipy scoring engine; live rules come from explain_scoring."
     ),
     "EverestAPI.quick_train": "Deprecated alias for POST /api/v1/compute/train.",
     "EverestAPI.custom_train": "Removed server-side (410); replaced by train(model='custom').",

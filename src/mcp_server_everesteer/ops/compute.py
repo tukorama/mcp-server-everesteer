@@ -10,6 +10,8 @@ from mcp_server_everesteer.models import ApiPayload, DownloadResult, WriteResult
 from mcp_server_everesteer.ops.registry import Call, JobId, Tournament, operation
 from mcp_server_everesteer.redaction import clean_label
 
+GpuTier = Literal["CPU", "T4", "A10G", "A100"]
+
 
 def _build_train_body(
     *,
@@ -19,6 +21,7 @@ def _build_train_body(
     gpu: str,
     max_hours: float,
     target: str | list[str] | None,
+    deploy_to_model_id: str | None,
     custom_model_fn: str | None,
     custom_feature_fn: str | None,
     params: dict[str, Any] | None,
@@ -37,6 +40,7 @@ def _build_train_body(
     }
     optional_fields: dict[str, Any] = {
         "target": target,
+        "deploy_to_model_id": deploy_to_model_id,
         "custom_model_fn": custom_model_fn,
         "custom_feature_fn": custom_feature_fn,
         "params": params,
@@ -155,7 +159,7 @@ async def price_training_job(
     features: str | list[str] = "small",
     target: str | list[str] | None = None,
     universe: Tournament = "futures",
-    gpu: Literal["CPU", "T4", "A10G", "A100"] = "CPU",
+    gpu: GpuTier = "CPU",
     max_hours: Annotated[float, Field(ge=0.1, le=4.0)] = 1.0,
     custom_model_fn: str | None = None,
     custom_feature_fn: str | None = None,
@@ -173,6 +177,7 @@ async def price_training_job(
         gpu=gpu,
         max_hours=max_hours,
         target=target,
+        deploy_to_model_id=None,
         custom_model_fn=custom_model_fn,
         custom_feature_fn=custom_feature_fn,
         params=params,
@@ -213,8 +218,12 @@ async def train_model(
     features: str | list[str] = "small",
     target: str | list[str] | None = None,
     universe: Tournament = "futures",
-    gpu: Literal["CPU", "T4", "A10G", "A100"] = "CPU",
+    gpu: GpuTier = "CPU",
     max_hours: Annotated[float, Field(ge=0.1, le=4.0)] = 1.0,
+    deploy_to_model_id: Annotated[
+        str | None,
+        Field(description="Optional model_id slot to deploy the trained .pkl into on completion."),
+    ] = None,
     custom_model_fn: str | None = None,
     custom_feature_fn: str | None = None,
     params: dict[str, Any] | None = None,
@@ -238,6 +247,7 @@ async def train_model(
         gpu=gpu,
         max_hours=max_hours,
         target=target,
+        deploy_to_model_id=deploy_to_model_id,
         custom_model_fn=custom_model_fn,
         custom_feature_fn=custom_feature_fn,
         params=params,

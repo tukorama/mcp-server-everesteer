@@ -60,13 +60,6 @@ def test_wheel_contains_data_licenses_entrypoint_and_lean_deps(tmp_path: Path) -
     with zipfile.ZipFile(wheels[0]) as archive:
         names = set(archive.namelist())
         assert "mcp_server_everesteer/py.typed" in names
-        for doc in (
-            "scoring.md",
-            "submission-contract.md",
-            "hackathon-vs-tournament.md",
-            "staking-safety.md",
-        ):
-            assert f"mcp_server_everesteer/knowledge/{doc}" in names
 
         assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
         assert any(name.endswith(".dist-info/licenses/NOTICE") for name in names)

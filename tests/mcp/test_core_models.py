@@ -9,7 +9,7 @@ from mcp.types import ElicitResult
 from mcp_server_everesteer.client import endpoints as ep
 from mcp_server_everesteer.config import Settings
 from tests.conftest import FakeApi
-from tests.mcp.helpers import call, session
+from tests.mcp.helpers import call, error, session
 
 pytestmark = pytest.mark.anyio
 
@@ -45,6 +45,7 @@ async def test_core_orientation_and_downloads(
         (404, {"detail": "stale version"}),
         b"EQUITIES_PARQUET",
     )
+    api.add(ep.DATA_DOWNLOAD_BULK, b"BULK_ZIP")
     api.add(ep.DATA_BENCHMARK, b"BENCH_PARQUET")
     api.add(ep.DATA_AI_MODEL, b"AI_MODEL_PARQUET")
 
@@ -91,6 +92,16 @@ async def test_core_orientation_and_downloads(
         )
         assert d2["version"] == "v2"
         assert d2["bytes_written"] == len(b"EQUITIES_PARQUET")
+
+        dbulk = await call(
+            client,
+            "download_dataset",
+            universe="equities",
+            split="bulk",
+            output_path=str(tmp_path / "bulk.zip"),
+        )
+        assert dbulk["artifact"] == "bulk_zip"
+        assert dbulk["bytes_written"] == len(b"BULK_ZIP")
 
         b1 = await call(
             client,
@@ -149,8 +160,10 @@ async def test_models_crud_presigned_and_multipart_upload_and_archive(
             "upload": {"method": "PUT", "url": s3_put, "headers": {"x-amz-acl": "private"}},
         },
         (404, {"detail": "not offered"}),
+        (404, {"detail": "No model 'missing'. Create it first with create_model."}),
     )
     api.add(ep.MODEL_UPLOAD_COMPLETE, {"upload_id": "up-1", "status": "validating"})
+    api.add(ep.MODEL_UPLOAD_FROM_JOB, {"upload_id": "up-job-1", "status": "validating"})
     api.add(ep.MODEL_UPLOAD, {"upload_id": "up-multipart", "status": "validating"})
     api.add(ep.MODEL_UPLOAD_STATUS, {"status": "validated"})
     api.add(ep.MODEL_MULTIPLIERS_GET, {"fit_multiplier": 1.0, "unq_multiplier": 1.0})
@@ -180,6 +193,17 @@ async def test_models_crud_presigned_and_multipart_upload_and_archive(
         # Second upload falls back to multipart on 404
         up2 = await call(client, "upload_model", model_id="m-uuid-1", file_path=str(pkl))
         assert up2["data"]["upload_id"] == "up-multipart"
+        # Model-not-found 404 must surface instead of falling back to multipart
+        await error(client, "upload_model", model_id="missing", file_path=str(pkl))
+        # Direct deploy from hosted training job
+        up_job = await call(
+            client,
+            "upload_model",
+            model_id="m-uuid-1",
+            from_job_id="job-1",
+            python_version="3.12",
+        )
+        assert up_job["data"]["upload_id"] == "up-job-1"
 
         assert (await call(client, "get_model_upload_status", model_id="m-uuid-1"))[
             "status"

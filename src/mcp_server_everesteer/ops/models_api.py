@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from mcp_server_everesteer.client import endpoints as ep
-from mcp_server_everesteer.errors import ConflictError, EveresteerError, NotFound
+from mcp_server_everesteer.errors import ConflictError, EveresteerError, InvalidRequest, NotFound
 from mcp_server_everesteer.models import ApiPayload, WriteResult, as_dict, as_list
 from mcp_server_everesteer.ops.registry import Call, ModelId, operation
 from mcp_server_everesteer.redaction import clean_label
@@ -133,6 +133,11 @@ async def rename_model(
     return WriteResult.from_raw(res, status="ok", message=f"Model renamed to {name}.")
 
 
+def _is_model_not_found(exc: EveresteerError) -> bool:
+    low = str(exc).lower()
+    return "no model" in low or "create_model" in low or "model not found" in low
+
+
 @operation(
     "Upload model .pkl",
     toolset="models",
@@ -143,8 +148,23 @@ async def upload_model(
     call: Call,
     model_id: ModelId,
     file_path: Annotated[
-        str, Field(min_length=1, description="Local path to cloudpickled .pkl file.")
-    ],
+        str | None,
+        Field(
+            min_length=1,
+            description=(
+                "Local path to cloudpickled .pkl file (mutually exclusive with from_job_id)."
+            ),
+        ),
+    ] = None,
+    from_job_id: Annotated[
+        str | None,
+        Field(
+            min_length=1,
+            description=(
+                "Completed hosted compute job_id to deploy server-side into this model slot."
+            ),
+        ),
+    ] = None,
     python_version: Annotated[
         str | None,
         Field(
@@ -153,10 +173,27 @@ async def upload_model(
         ),
     ] = None,
 ) -> WriteResult:
-    """Upload a cloudpickled `predict(...)` `.pkl` via presigned storage (or multipart fallback).
+    """Upload a cloudpickled `.pkl` file or deploy directly from a hosted compute `from_job_id`."""
+    if from_job_id is not None:
+        if file_path is not None:
+            raise InvalidRequest("Provide exactly one of `file_path` or `from_job_id`.")
+        body: dict[str, Any] = {"job_id": from_job_id}
+        if python_version is not None:
+            body["python_version"] = python_version
+        res = await call.json(
+            ep.MODEL_UPLOAD_FROM_JOB,
+            path_args={"model_id": model_id},
+            body=body,
+        )
+        return WriteResult.from_raw(
+            res,
+            status="accepted",
+            message=f"Deployed job {from_job_id} to model {model_id} for sandbox validation.",
+            next_step=f"Poll `get_model_upload_status(model_id='{model_id}')` until validated.",
+        )
 
-    See `everesteer://docs/submission-contract` for the exact callable & [0, 1] output rules.
-    """
+    if file_path is None:
+        raise InvalidRequest("Provide either `file_path` or `from_job_id`.")
     await call.progress(0.1, "Reading local .pkl artifact")
     data, fname, _ = await call.client.read_local_file(file_path)
 
@@ -168,6 +205,8 @@ async def upload_model(
             body={"filename": fname},
         )
     except (NotFound, EveresteerError) as exc:
+        if _is_model_not_found(exc):
+            raise
         if isinstance(exc, NotFound) or exc.status == 404:
             presign = None
         else:

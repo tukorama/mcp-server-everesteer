@@ -7,7 +7,7 @@ from typing import Any
 import httpx2
 from mcp.server import MCPServer
 
-from mcp_server_everesteer import __version__, knowledge
+from mcp_server_everesteer import __version__, prompts
 from mcp_server_everesteer.capabilities import Capabilities
 from mcp_server_everesteer.config import Settings
 from mcp_server_everesteer.logging_setup import configure_logging
@@ -46,7 +46,7 @@ def create_server(
         "mcp-server-everesteer",
         title="Everesteer (unofficial)",
         version=__version__,
-        instructions=knowledge.agent_guide(caps.toolsets, gates=caps.gates),
+        instructions=prompts.agent_guide(caps.toolsets, gates=caps.gates),
         lifespan=lifespan,
         log_level=resolved.log_level,
     )
