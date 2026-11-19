@@ -8,13 +8,13 @@
     "url": "https://github.com/tukorama/mcp-server-everesteer",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "mcp-server-everesteer",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "runtimeHint": "uvx",
       "transport": { "type": "stdio" },
       "environmentVariables": [
@@ -36,7 +36,7 @@
         },
         {
           "name": "EVERESTEER_ALLOW_STAKING",
-          "description": "Set to true to expose USDC staking, allocation, claim, and vault tools.",
+          "description": "Set to true to expose USDC staking, allocation, claim, and per-model stake plan tools.",
           "isRequired": false
         },
         {
