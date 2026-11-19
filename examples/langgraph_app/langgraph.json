@@ -1,0 +1,5 @@
+{
+  "dependencies": ["."],
+  "graphs": { "everesteer": "./graph.py:graph" },
+  "env": ".env"
+}

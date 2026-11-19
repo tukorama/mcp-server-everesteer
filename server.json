@@ -1,0 +1,76 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tukorama/mcp-server-everesteer",
+  "title": "Everesteer (unofficial)",
+  "description": "Agent-first MCP server and LangGraph tools for the Everesteer prediction tournament API. Unofficial.",
+  "websiteUrl": "https://pypi.org/project/mcp-server-everesteer/",
+  "repository": {
+    "url": "https://github.com/tukorama/mcp-server-everesteer",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "mcp-server-everesteer",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "EVERESTEER_API_KEY",
+          "description": "Everesteer API key (or EIQ_API_KEY). Not needed after `mcp-server-everesteer auth`.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "EVERESTEER_TOOLSETS",
+          "description": "Tool groups to expose, e.g. auto, all, or auto,+staking,+equities.",
+          "isRequired": false
+        },
+        {
+          "name": "EVERESTEER_ALLOW_WRITES",
+          "description": "Set to true to expose prediction, model, diagnostics, compute, and account write tools.",
+          "isRequired": false
+        },
+        {
+          "name": "EVERESTEER_ALLOW_STAKING",
+          "description": "Set to true to expose USDC staking, allocation, claim, and vault tools.",
+          "isRequired": false
+        },
+        {
+          "name": "EVERESTEER_ALLOW_WITHDRAWALS",
+          "description": "Set to true to expose USDC withdrawal and destructive emergency tools.",
+          "isRequired": false
+        },
+        {
+          "name": "EVERESTEER_MAX_STAKE_USDC",
+          "description": "Maximum USDC per staking write (default 100).",
+          "isRequired": false
+        },
+        {
+          "name": "EVERESTEER_MAX_WITHDRAW_USDC",
+          "description": "Maximum USDC per withdrawal (default 100).",
+          "isRequired": false
+        },
+        {
+          "name": "EVERESTEER_MAX_DAILY_USDC",
+          "description": "Maximum USDC committed per UTC day across staking or withdrawals (default 1000).",
+          "isRequired": false
+        },
+        {
+          "name": "CF_ACCESS_CLIENT_ID",
+          "description": "Optional Cloudflare Access service token client id (for staging hosts).",
+          "isRequired": false
+        },
+        {
+          "name": "CF_ACCESS_CLIENT_SECRET",
+          "description": "Optional Cloudflare Access service token secret.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

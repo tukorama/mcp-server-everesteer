@@ -1,0 +1,16 @@
+__pycache__/
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.env
+credentials.json
+journal.sqlite3
+*.key
+*.pkl
+*.parquet
+.claude/
+.DS_Store
+.langgraph_api/

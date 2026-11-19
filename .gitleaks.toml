@@ -1,0 +1,36 @@
+title = "Gitleaks configuration for mcp-server-everesteer"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "everesteer-api-key"
+description = "Everesteer API key (eiq_ prefix)"
+regex = '''\beiq_[A-Za-z0-9_-]{16,}\b'''
+tags = ["key", "everesteer"]
+
+[[rules]]
+id = "cloudflare-access-secret"
+description = "Cloudflare Access service token secret"
+regex = '''(?i)(?:cf[-_]access[-_]client[-_]secret)\s*[:=]\s*['"]?([A-Za-z0-9._-]{16,})['"]?'''
+secretGroup = 1
+tags = ["secret", "cloudflare"]
+
+[[rules]]
+id = "everesteer-webhook-secret"
+description = "Everesteer webhook signing secret"
+regex = '''\bwhsec_[A-Za-z0-9_-]{16,}\b'''
+tags = ["secret", "webhook"]
+
+[allowlist]
+description = "Synthetic placeholder strings in tests and documentation"
+regexes = [
+    '''eiq_test_fixture_[A-Za-z0-9_-]+''',
+    '''eiq_your_[A-Za-z0-9_-]+''',
+    '''eiq_fake_[A-Za-z0-9_-]+''',
+    '''whsec_test_fixture_[A-Za-z0-9_-]+''',
+    '''cf_secret_test_fixture_[A-Za-z0-9_-]+''',
+]
+paths = [
+    '''^\.gitleaks\.toml$''',
+]
