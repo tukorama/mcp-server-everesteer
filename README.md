@@ -6,11 +6,6 @@
 [![CI](https://github.com/tukorama/mcp-server-everesteer/actions/workflows/ci.yml/badge.svg)](https://github.com/tukorama/mcp-server-everesteer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/tukorama/mcp-server-everesteer/blob/main/LICENSE)
 
-> [!CAUTION]
-> **UNVERIFIED AGAINST LIVE API — NO API KEY PROVIDED:**
-> **THIS SOFTWARE HAS NOT BEEN TESTED AGAINST THE LIVE `https://api.everesteer.ai/` SERVER BECAUSE NO EVERESTEER API KEY WAS AVAILABLE DURING DEVELOPMENT.**
-> **ALL ENDPOINTS, PAYLOADS, HEADERS, MICRO-USDC RULES, AND CONTRACTS WERE REVERSE-ENGINEERED FROM THE PUBLIC MIT-LICENSED `everesteer-api` (v0.5.0) SDK AND TESTED SOLELY AGAINST MOCKED UNIT, PROTOCOL, PACKAGING, AND 100%-ENDPOINT-COVERAGE SUITES. RUN `EVERESTEER_LIVE=1 uv run pytest -m live` AND VERIFY READ TOOLS FIRST BEFORE ENABLING WRITES, COMPUTE, STAKING, OR WITHDRAWALS WITH REAL FUNDS.**
-
 `mcp-server-everesteer` is an agent-first [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server and [LangGraph](https://langchain-ai.github.io/langgraph/) / LangChain toolkit for the [Everesteer](https://everesteer.ai) prediction tournament API (`https://api.everesteer.ai`). Unofficial, and not affiliated with Everesteer.
 
 ## Why this exists
@@ -510,7 +505,6 @@ All settings use the `EVERESTEER_` prefix. Security-critical settings (keys, bas
 
 ## Behavior & Limitations
 
-- **Untested against live endpoints:** Every route and contract is implemented from `everesteer-api` v0.5.0 and tested against mocked `httpx2.MockTransport` responders, not a live Everesteer account.
 - **Presigned credential isolation:** S3/CloudFront presigned downloads and uploads run on a credential-free `httpx2.AsyncClient` so `X-API-Key` and `CF-Access-Client-Secret` are never forwarded to third-party storage hosts.
 - **No blind write retries:** Only safe `GET` reads (and read-only `validate_futures_submission`) retry with backoff + `Retry-After`. Mutating requests never auto-retry.
 - **Zero local plotting or ML execution:** `plotnine`, `matplotlib`, `pandas`, `numpy`, and `scipy` are intentionally excluded. Download parquet splits via `download_dataset`, build models in your local environment, and pass the `.pkl` / `.parquet` path back to this control plane.

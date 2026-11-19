@@ -30,9 +30,6 @@ def test_version_and_registry_manifest_match() -> None:
 
 def test_readme_notice_marker_and_absolute_links() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    upper = readme.upper()
-    assert "NOT BEEN TESTED" in upper
-    assert "NO API KEY" in upper
     assert "mcp-name: io.github.tukorama/mcp-server-everesteer" in readme
 
     prose = _FENCED_BLOCK.sub("", readme)

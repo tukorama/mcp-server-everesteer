@@ -133,7 +133,14 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
 
 
 @pytest.fixture(autouse=True)
-def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def isolated_env(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    if (
+        request.node.get_closest_marker("live") is not None
+        and os.environ.get("EVERESTEER_LIVE") == "1"
+    ):
+        return
     for name in list(os.environ):
         if name.startswith(("EVERESTEER_", "EIQ_", "EVEREST_", "CF_ACCESS_")):
             monkeypatch.delenv(name)
