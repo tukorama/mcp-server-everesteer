@@ -1,6 +1,6 @@
 [project]
 name = "mcp-server-everesteer"
-version = "0.1.1"
+version = "0.1.2"
 description = "Agent-first MCP server and LangGraph tools for the Everesteer prediction tournament API. Unofficial, not affiliated with Everesteer."
 readme = "README.md"
 license = "MIT"

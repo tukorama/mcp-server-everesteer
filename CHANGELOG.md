@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-25
+
 ### Fixed
 - `withdraw_usdc` no longer sends an identical retry of a timed-out withdrawal under a fresh `Idempotency-Key`. The key is left out of the duplicate fingerprint and stored in the journal; a retry of an `unknown` withdrawal reuses it and counts once toward the daily cap, a retry under a different key is refused, and so are an identical withdrawal that is still in flight and a repeat of one that already succeeded within 15 minutes.
 - `set_staking_plan(enabled=False)` no longer fails after confirmation; a plan without an amount records no USDC movement.
