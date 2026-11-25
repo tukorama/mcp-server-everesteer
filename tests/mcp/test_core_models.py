@@ -1,22 +1,56 @@
 """MCP tests for `core` and `models` toolsets."""
 
+import errno
+import io
+import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mcp.types import ElicitResult
+from pydantic import SecretStr
 
 from mcp_server_everesteer.client import endpoints as ep
 from mcp_server_everesteer.config import Settings
-from tests.conftest import FakeApi
+from tests.conftest import FakeApi, make_settings, parquet_bytes
 from tests.mcp.helpers import call, error, session
+
+if TYPE_CHECKING:
+    from _typeshed import ReadableBuffer
+
+FUTURES_PARQUET = parquet_bytes(b"FUTURES")
+EQUITIES_PARQUET = parquet_bytes(b"EQUITIES")
+BULK_ZIP = b"PK\x03\x04BULK_ZIP"
+BENCH_PARQUET = parquet_bytes(b"BENCH")
+AI_MODEL_PARQUET = parquet_bytes(b"AI_MODEL")
+PREVIOUS = parquet_bytes(b"PREVIOUS_GOOD_DOWNLOAD")
+CDN_TRAIN = "https://cdn.everesteer.test/futures_train.parquet?sig=1"
+ACCESS_LOGIN = "https://everesteer.cloudflareaccess.com/cdn-cgi/access/login/api.everesteer.ai"
+_real_fdopen = os.fdopen
 
 pytestmark = pytest.mark.anyio
 
 
+class _FullDisk(io.FileIO):
+    """A file that accepts the first few bytes and then fails like a full disk."""
+
+    def write(self, b: "ReadableBuffer", /) -> int:
+        super().write(memoryview(b)[:4])
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def _full_disk_fdopen(fd: int, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+    return _FullDisk(fd, "w") if mode == "wb" else _real_fdopen(fd, mode, *args, **kwargs)
+
+
+def _entries(folder: Path) -> list[str]:
+    return sorted(path.name for path in folder.iterdir())
+
+
 async def test_core_orientation_and_downloads(
-    authed_settings: Settings, api: FakeApi, tmp_path: Path
+    authed_settings: Settings, api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     api.add(ep.HEALTH, {"status": "ok"})
     api.add(ep.CAPABILITIES, {"api_base": "https://api.everesteer.ai", "mcp": "/mcp"})
     api.add(ep.SCORING, {"weights": {"score_multiple_constant": 0.1}})
@@ -39,15 +73,15 @@ async def test_core_orientation_and_downloads(
     # Presigned CDN redirect on futures train download, plus 404 self-heal on equities v1 -> v2.
     cdn_futures = "https://cdn.everesteer.test/futures_train.parquet?sig=1"
     api.add(ep.FUTURES_DATA, (302, b"", {"Location": cdn_futures}))
-    api.add_cdn(cdn_futures, b"FUTURES_PARQUET")
+    api.add_cdn(cdn_futures, FUTURES_PARQUET)
     api.add(
         ep.DATA_DOWNLOAD,
         (404, {"detail": "stale version"}),
-        b"EQUITIES_PARQUET",
+        EQUITIES_PARQUET,
     )
-    api.add(ep.DATA_DOWNLOAD_BULK, b"BULK_ZIP")
-    api.add(ep.DATA_BENCHMARK, b"BENCH_PARQUET")
-    api.add(ep.DATA_AI_MODEL, b"AI_MODEL_PARQUET")
+    api.add(ep.DATA_DOWNLOAD_BULK, BULK_ZIP)
+    api.add(ep.DATA_BENCHMARK, BENCH_PARQUET)
+    api.add(ep.DATA_AI_MODEL, AI_MODEL_PARQUET)
 
     async with session(authed_settings, api) as client:
         assert (await call(client, "get_health"))["status"] == "ok"
@@ -79,7 +113,7 @@ async def test_core_orientation_and_downloads(
             split="train",
             output_path=str(tmp_path / "fut.parquet"),
         )
-        assert d1["bytes_written"] == len(b"FUTURES_PARQUET")
+        assert d1["bytes_written"] == len(FUTURES_PARQUET)
 
         # Trigger 404 version self-heal on equities
         d2 = await call(
@@ -91,7 +125,7 @@ async def test_core_orientation_and_downloads(
             output_path=str(tmp_path / "eq.parquet"),
         )
         assert d2["version"] == "v2"
-        assert d2["bytes_written"] == len(b"EQUITIES_PARQUET")
+        assert d2["bytes_written"] == len(EQUITIES_PARQUET)
 
         dbulk = await call(
             client,
@@ -101,7 +135,7 @@ async def test_core_orientation_and_downloads(
             output_path=str(tmp_path / "bulk.zip"),
         )
         assert dbulk["artifact"] == "bulk_zip"
-        assert dbulk["bytes_written"] == len(b"BULK_ZIP")
+        assert dbulk["bytes_written"] == len(BULK_ZIP)
 
         b1 = await call(
             client,
@@ -110,7 +144,7 @@ async def test_core_orientation_and_downloads(
             split="train",
             output_path=str(tmp_path / "b_fut.parquet"),
         )
-        assert b1["bytes_written"] == len(b"FUTURES_PARQUET")
+        assert b1["bytes_written"] == len(FUTURES_PARQUET)
         b2 = await call(
             client,
             "download_benchmark",
@@ -118,7 +152,7 @@ async def test_core_orientation_and_downloads(
             split="validation",
             output_path=str(tmp_path / "b_eq.parquet"),
         )
-        assert b2["bytes_written"] == len(b"BENCH_PARQUET")
+        assert b2["bytes_written"] == len(BENCH_PARQUET)
         ai = await call(
             client,
             "download_ai_model",
@@ -126,7 +160,132 @@ async def test_core_orientation_and_downloads(
             version="v0",
             output_path=str(tmp_path / "ai.parquet"),
         )
-        assert ai["bytes_written"] == len(b"AI_MODEL_PARQUET")
+        assert ai["bytes_written"] == len(AI_MODEL_PARQUET)
+
+
+async def test_download_outside_the_working_directory_is_refused(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    outside = tmp_path / "outside" / "fut.parquet"
+    api.add(ep.FUTURES_DATA, FUTURES_PARQUET)
+
+    async with session(authed_settings, api) as client:
+        message = await error(client, "download_dataset", split="train", output_path=str(outside))
+
+    assert "outside the download directories" in message
+    assert not outside.exists()
+    assert api.calls(ep.FUTURES_DATA) == []
+
+
+async def test_download_through_a_symlinked_directory_is_refused(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "work"
+    outside = tmp_path / "outside"
+    work.mkdir()
+    outside.mkdir()
+    (work / "link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(work)
+    api.add(ep.FUTURES_DATA, FUTURES_PARQUET)
+
+    async with session(authed_settings, api) as client:
+        message = await error(client, "download_dataset", split="train", output_path="link/f.pq")
+
+    assert "outside the download directories" in message
+    assert _entries(outside) == []
+
+
+async def test_download_dir_env_accepts_absolute_paths_and_hosts_default_names(
+    api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, data, elsewhere = tmp_path / "first", tmp_path / "data", tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("EVERESTEER_DOWNLOAD_DIR", os.pathsep.join([str(first), str(data)]))
+    settings = make_settings(tmp_path, api_key=SecretStr("eiq_test_fixture_key_000001"))
+    target = data / "everesteer" / "futures_train.parquet"
+    api.add(ep.FUTURES_DATA, FUTURES_PARQUET)
+
+    async with session(settings, api) as client:
+        saved = await call(client, "download_dataset", split="train", output_path=str(target))
+        default = await call(client, "download_dataset", split="train")
+
+    assert saved["path"] == str(target.resolve())
+    assert target.read_bytes() == FUTURES_PARQUET
+    assert default["path"] == str((first / "futures_train.parquet").resolve())
+    assert _entries(elsewhere) == []
+
+
+async def test_failed_download_write_keeps_the_previous_file(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    dest = tmp_path / "fut.parquet"
+    dest.write_bytes(PREVIOUS)
+    api.add(ep.FUTURES_DATA, FUTURES_PARQUET)
+    monkeypatch.setattr(os, "fdopen", _full_disk_fdopen)
+
+    async with session(authed_settings, api) as client:
+        message = await error(client, "download_dataset", split="train", output_path=str(dest))
+
+    assert "No space left on device" in message
+    assert dest.read_bytes() == PREVIOUS
+    assert [name for name in _entries(tmp_path) if name.endswith(".part")] == []
+
+
+async def test_cloudflare_access_redirect_is_not_saved_as_the_dataset(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    dest = tmp_path / "fut.parquet"
+    dest.write_bytes(PREVIOUS)
+    api.cdn_hosts.add("everesteer.cloudflareaccess.com")
+    api.add(ep.FUTURES_DATA, (302, b"", {"Location": ACCESS_LOGIN}))
+    login_page = "<html><title>Sign in - Cloudflare Access</title></html>"
+    api.add_cdn(ACCESS_LOGIN, login_page, headers={"content-type": "text/html"})
+
+    async with session(authed_settings, api) as client:
+        message = await error(client, "download_dataset", split="train", output_path=str(dest))
+
+    assert "Cloudflare Access" in message
+    assert dest.read_bytes() == PREVIOUS
+    assert api.cdn_requests == []
+
+
+@pytest.mark.parametrize(
+    ("api_response", "cdn_body", "cdn_headers"),
+    [
+        ({"detail": "maintenance window"}, None, {}),
+        ((302, b"", {"Location": CDN_TRAIN}), "<!doctype html><html>Sign in</html>", {}),
+        ((302, b"", {"Location": CDN_TRAIN}), "<p>Sign in</p>", {"content-type": "text/html"}),
+        ((302, b"", {"Location": CDN_TRAIN}), b"NOT A PARQUET FILE", {}),
+    ],
+)
+async def test_non_parquet_bodies_are_refused_and_keep_the_previous_file(
+    authed_settings: Settings,
+    api: FakeApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    api_response: Any,
+    cdn_body: bytes | str | None,
+    cdn_headers: dict[str, str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    dest = tmp_path / "fut.parquet"
+    dest.write_bytes(PREVIOUS)
+    api.add(ep.FUTURES_DATA, api_response)
+    if cdn_body is not None:
+        api.add_cdn(CDN_TRAIN, cdn_body, headers=cdn_headers)
+
+    async with session(authed_settings, api) as client:
+        message = await error(client, "download_dataset", split="train", output_path=str(dest))
+
+    assert "nothing was saved" in message
+    assert dest.read_bytes() == PREVIOUS
+    assert [name for name in _entries(tmp_path) if name.endswith(".part")] == []
 
 
 async def test_models_crud_presigned_and_multipart_upload_and_archive(

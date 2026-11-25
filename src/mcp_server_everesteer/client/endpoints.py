@@ -4,6 +4,10 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
+from mcp_server_everesteer.errors import InvalidRequest
+
+_DOT_SEGMENTS = frozenset({"", ".", ".."})
+
 
 def pathseg(value: str) -> str:
     """URL-encode one value as a single opaque path segment (including slashes)."""
@@ -37,7 +41,13 @@ class Endpoint:
     def render(self, path_args: dict[str, str] | None = None) -> str:
         rendered = self.path
         for name, val in (path_args or {}).items():
-            rendered = rendered.replace("{" + name + "}", pathseg(val))
+            segment = pathseg(val)
+            if segment in _DOT_SEGMENTS:
+                raise InvalidRequest(
+                    f"Path argument `{name}` must not be empty, '.' or '..' (got {str(val)!r}).",
+                    hint="Pass the real identifier returned by Everesteer.",
+                )
+            rendered = rendered.replace("{" + name + "}", segment)
         if "{" in rendered:
             raise ValueError(f"Missing path arguments for {self.path}: {rendered}")
         return rendered

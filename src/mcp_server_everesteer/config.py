@@ -32,6 +32,7 @@ _NOT_FROM_DOTENV = {
     "credentials_file",
     "journal_file",
     "cache_dir",
+    "download_dir",
     "allow_writes",
     "allow_staking",
     "allow_withdrawals",
@@ -148,6 +149,8 @@ class Settings(BaseSettings):
     credentials_file: Path | None = None
     journal_file: Path | None = None
     cache_dir: Path | None = None
+    # Directories (separated by os.pathsep) that downloads may write into; default: the cwd.
+    download_dir: str | None = None
     cache_ttl: int = Field(default=3600, ge=0)
 
     # Three default-closed safety gates.
@@ -210,6 +213,13 @@ class Settings(BaseSettings):
     @property
     def resolved_cache_dir(self) -> Path:
         return (self.cache_dir or cache_dir()).expanduser()
+
+    @property
+    def download_roots(self) -> tuple[Path, ...]:
+        """Resolved directories that downloads may write into (the working directory by default)."""
+        entries = [entry.strip() for entry in (self.download_dir or "").split(os.pathsep)]
+        roots = [Path(entry).expanduser() for entry in entries if entry] or [Path.cwd()]
+        return tuple(root.resolve() for root in roots)
 
     @property
     def resolved_base_url(self) -> str:

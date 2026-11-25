@@ -343,6 +343,9 @@ Staking and withdrawal tools sit in the `staking` toolset and stay hidden until 
 - **Audit first:** Run the `review_staking` prompt (`get_profile` for `email_verified_at`, `get_wallet_status` for 24 h withdrawal cooling, `get_staking_strategy`, `get_staking_plans`, `get_staking_positions`, `list_unconfirmed_writes`), then configure per-model plans (`constant` or `compound`) via `set_staking_plan`.
 - **Exact money types:** Always pass USDC as a decimal string (`"25.5"`) or integer micro-USDC (`amount_micro=25_500_000`). Binary floats are rejected locally before touching the network.
 - **Mandatory confirmation & SQLite journal:** Every staking/allocation/claim/withdrawal asks for human confirmation via MCP Elicitation (or LangGraph `interrupt()`). Withdrawal and destructive confirmations (`withdraw_usdc`, `freeze_withdrawals`, `archive_model`, `revoke_api_key`, `delete_diagnostics_run`) cannot be skipped even if `EVERESTEER_CONFIRM=none`.
+- **Checks before the prompt:** Per-call limits, the daily cap, and the duplicate guard run before the confirmation is shown, and again atomically with the journal insert. Server processes that share one journal file cannot overshoot `EVERESTEER_MAX_DAILY_USDC` together.
+- **Conservative daily accounting:** `relay_stake` forwards an amount only the chain knows, so it counts as `EVERESTEER_MAX_STAKE_USDC` (or as the whole daily cap when that limit is `unlimited`). A per-round stake plan counts its per-round stake on the day it is set and on every later UTC day while it is in force, until a newer plan for the same model (for example `enabled=false`) is confirmed. Disabling a plan moves no USDC.
+- **Withdrawal retries:** If a withdrawal times out (`status="unknown"`), an identical retry reuses that attempt's `Idempotency-Key` so Everesteer can deduplicate it, and it counts once toward the daily cap. A retry under a different key is refused, and so are an identical withdrawal while the first is still in flight and a repeat of one that already succeeded in the last 15 minutes.
 
 ### Step 7 — LangGraph, LangChain, and Auto-Generated Diagrams
 
@@ -500,12 +503,14 @@ All settings use the `EVERESTEER_` prefix. Security-critical settings (keys, bas
 | `EVERESTEER_CREDENTIALS_FILE` | `~/.config/mcp-server-everesteer/credentials.json` | Stored API key (`0600`) |
 | `EVERESTEER_JOURNAL_FILE` | `~/.config/mcp-server-everesteer/journal.sqlite3` | Local SQLite write journal (`0600`) |
 | `EVERESTEER_CACHE_DIR` | `~/.cache/mcp-server-everesteer` | Per-account catalog/schema cache |
+| `EVERESTEER_DOWNLOAD_DIR` | working directory | Directories that download tools may write into, separated by `os.pathsep` (`:` on macOS/Linux, `;` on Windows). Relative `output_path` values and default file names land in the first one |
 | `EVERESTEER_HTTP_BEARER_TOKEN` | | Required for `serve --transport streamable-http` on non-loopback hosts |
 | `EVERESTEER_LOG_LEVEL` | `INFO` | Stderr logging level (`stdout` stays pure MCP JSON-RPC) |
 
 ## Behavior & Limitations
 
 - **Presigned credential isolation:** S3/CloudFront presigned downloads and uploads run on a credential-free `httpx2.AsyncClient` so `X-API-Key` and `CF-Access-Client-Secret` are never forwarded to third-party storage hosts.
+- **Confined, atomic downloads:** `download_dataset`, `download_benchmark`, `download_ai_model`, and `download_job_artifact` only write inside `EVERESTEER_DOWNLOAD_DIR` (default: the server's working directory). Symlinks are resolved before that check, and `..` segments and symlinked target files are refused. The body streams into a temporary file next to the target, is fsynced, must look like the expected artifact (`PAR1` magic for parquet, a zip header for `split="bulk"`, never an HTML or JSON page or a Cloudflare Access login), and only then replaces the target, so a failed download keeps the previous file. The returned `path` is the resolved absolute path. Set `EVERESTEER_DOWNLOAD_DIR` explicitly if your MCP client starts servers in `/` or your home directory, since the default root is then that whole tree.
 - **No blind write retries:** Only safe `GET` reads (and read-only `validate_futures_submission`) retry with backoff + `Retry-After`. Mutating requests never auto-retry.
 - **Zero local plotting or ML execution:** `plotnine`, `matplotlib`, `pandas`, `numpy`, and `scipy` are intentionally excluded. Download parquet splits via `download_dataset`, build models in your local environment, and pass the `.pkl` / `.parquet` path back to this control plane.
 - **Secret hygiene:** `eiq_*`, `whsec_*`, `CF-Access-Client-Secret`, `Authorization` headers, and registered secrets are masked from logs and tool errors; untrusted remote strings are stripped of control and Unicode bidirectional override characters.

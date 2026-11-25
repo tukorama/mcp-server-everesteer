@@ -44,6 +44,24 @@ def test_dotenv_cannot_override_sensitive_settings(
     assert s.log_level == "DEBUG"
 
 
+def test_dotenv_cannot_widen_the_download_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("EVERESTEER_DOWNLOAD_DIR=/\n", encoding="utf-8")
+    assert Settings().download_roots == (tmp_path.resolve(),)
+
+
+def test_download_roots_split_the_environment_variable_on_pathsep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    first, second = tmp_path / "first", tmp_path / "second"
+    monkeypatch.setenv("EVERESTEER_DOWNLOAD_DIR", os.pathsep.join([str(first), " ", str(second)]))
+    roots = Settings(_env_file=None).download_roots  # type: ignore[call-arg]
+    assert roots == (first.resolve(), second.resolve())
+
+
 @pytest.mark.parametrize(
     "bad_url",
     [

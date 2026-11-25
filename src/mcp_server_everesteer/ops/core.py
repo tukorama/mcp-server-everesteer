@@ -231,6 +231,7 @@ async def download_dataset(
             saved_path, size = await call.client.download_presigned(
                 ep.DATA_DOWNLOAD_BULK,
                 dest,
+                kind="zip",
                 path_args={"version": resolved, "universe_id": universe},
                 deadline=call.deadline,
             )
@@ -242,6 +243,7 @@ async def download_dataset(
             saved_path, size = await call.client.download_presigned(
                 ep.DATA_DOWNLOAD_BULK,
                 dest,
+                kind="zip",
                 path_args={"version": resolved, "universe_id": universe},
                 deadline=call.deadline,
             )
@@ -257,7 +259,11 @@ async def download_dataset(
     dest = output_path or f"{universe}_{split}.parquet"
     if universe == "futures":
         saved_path, size = await call.client.download_presigned(
-            ep.FUTURES_DATA, dest, path_args={"split": split}, deadline=call.deadline
+            ep.FUTURES_DATA,
+            dest,
+            kind="parquet",
+            path_args={"split": split},
+            deadline=call.deadline,
         )
         return DownloadResult(path=saved_path, bytes_written=size, universe=universe, split=split)
 
@@ -268,6 +274,7 @@ async def download_dataset(
         saved_path, size = await call.client.download_presigned(
             ep.DATA_DOWNLOAD,
             dest,
+            kind="parquet",
             path_args={"version": resolved, "universe": universe, "split": split},
             deadline=call.deadline,
         )
@@ -279,6 +286,7 @@ async def download_dataset(
         saved_path, size = await call.client.download_presigned(
             ep.DATA_DOWNLOAD,
             dest,
+            kind="parquet",
             path_args={"version": resolved, "universe": universe, "split": split},
             deadline=call.deadline,
         )
@@ -302,7 +310,11 @@ async def download_benchmark(
     if universe == "futures":
         bench_split = f"{split}_benchmark_models"
         saved_path, size = await call.client.download_presigned(
-            ep.FUTURES_DATA, dest, path_args={"split": bench_split}, deadline=call.deadline
+            ep.FUTURES_DATA,
+            dest,
+            kind="parquet",
+            path_args={"split": bench_split},
+            deadline=call.deadline,
         )
         return DownloadResult(
             path=saved_path,
@@ -317,6 +329,7 @@ async def download_benchmark(
     saved_path, size = await call.client.download_presigned(
         ep.DATA_BENCHMARK,
         dest,
+        kind="parquet",
         path_args={"version": resolved, "universe": universe, "split": split},
         deadline=call.deadline,
     )
@@ -347,6 +360,7 @@ async def download_ai_model(
     saved_path, size = await call.client.download_presigned(
         ep.DATA_AI_MODEL,
         dest,
+        kind="parquet",
         path_args={"version": resolved, "universe": universe},
         deadline=call.deadline,
     )

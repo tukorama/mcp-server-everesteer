@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field
 
 from mcp_server_everesteer.client import endpoints as ep
+from mcp_server_everesteer.client.transfer import kind_for_name
 from mcp_server_everesteer.errors import ServerError
 from mcp_server_everesteer.models import ApiPayload, DownloadResult, WriteResult, as_dict
 from mcp_server_everesteer.ops.registry import Call, JobId, Tournament, operation
@@ -131,7 +132,7 @@ async def download_job_artifact(
         url = str(info["download_url"])
         dest = output_path or f"{job_id}.pkl"
         saved_path, size = await call.client.download_url_to_file(
-            url, dest, server_supplied=False, deadline=call.deadline
+            url, dest, kind="binary", deadline=call.deadline
         )
         return DownloadResult(path=saved_path, bytes_written=size, artifact="model_pkl")
 
@@ -141,6 +142,7 @@ async def download_job_artifact(
     saved_path, size = await call.client.download_presigned(
         ep.COMPUTE_JOB_OUTPUT,
         str(dest_file),
+        kind=kind_for_name(filename),
         path_args={"job_id": job_id, "filename": filename},
         deadline=call.deadline,
     )

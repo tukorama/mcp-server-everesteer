@@ -3,6 +3,9 @@
 import csv
 import importlib
 import json
+import math
+from collections.abc import Iterable
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
@@ -21,19 +24,51 @@ def _is_model_not_found(exc: EveresteerError) -> bool:
     return "no model" in low or "create_model" in low or "model not found" in low
 
 
-def _rows_to_predictions(rows: list[dict[str, Any]], source: str) -> dict[str, float]:
+def _prediction_number(raw: Any) -> float | None:
+    """Return a finite float for one prediction value, or None for null/bool/blank/non-numbers."""
+    if isinstance(raw, bool) or not isinstance(raw, int | float | Decimal | str):
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    try:
+        number = float(raw)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _to_predictions(pairs: Iterable[tuple[str, Any]], source: str) -> dict[str, float]:
+    """Convert `(instrument_id, value)` pairs to floats, naming every instrument that is not."""
     out: dict[str, float] = {}
-    for row in rows:
-        iid = row.get("instrument_id") if "instrument_id" in row else row.get("id")
-        pred = row.get("prediction") if "prediction" in row else row.get("score")
-        if iid is None or pred is None:
-            raise InvalidRequest(
-                f"Rows in {source} must contain `id`/`instrument_id` and `prediction` columns."
-            )
-        out[str(iid)] = float(pred)
+    bad: list[str] = []
+    for iid, raw in pairs:
+        number = _prediction_number(raw)
+        if number is None:
+            bad.append(f"{iid}={raw!r}")
+        else:
+            out[iid] = number
+    if bad:
+        preview = ", ".join(bad[:5])
+        more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
+        raise InvalidRequest(
+            f"{len(bad)} prediction(s) in {source} are not finite numbers: {preview}{more}",
+            hint="Fill or drop null, NaN, empty, and boolean values (pandas writes NaN as null).",
+        )
     if not out:
         raise InvalidRequest(f"No predictions found in {source}.")
     return out
+
+
+def _rows_to_predictions(rows: list[dict[str, Any]], source: str) -> dict[str, float]:
+    pairs: list[tuple[str, Any]] = []
+    for row in rows:
+        iid = row.get("instrument_id") if "instrument_id" in row else row.get("id")
+        if iid is None or ("prediction" not in row and "score" not in row):
+            raise InvalidRequest(
+                f"Rows in {source} must contain `id`/`instrument_id` and `prediction` columns."
+            )
+        pairs.append((str(iid), row["prediction"] if "prediction" in row else row["score"]))
+    return _to_predictions(pairs, source)
 
 
 def _read_predictions_file(path_str: str) -> dict[str, float]:
@@ -45,7 +80,7 @@ def _read_predictions_file(path_str: str) -> dict[str, float]:
         loaded: Any = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             loaded_d = cast(dict[Any, Any], loaded)
-            return {str(k): float(v) for k, v in loaded_d.items()}
+            return _to_predictions(((str(k), v) for k, v in loaded_d.items()), path_str)
         if isinstance(loaded, list):
             items = cast(list[Any], loaded)
             return _rows_to_predictions([as_dict(item) for item in items], path_str)
@@ -68,14 +103,37 @@ def _read_predictions_file(path_str: str) -> dict[str, float]:
     )
 
 
-def _load_predictions_source(
-    predictions: dict[str, float] | None, predictions_path: str | None
-) -> dict[str, float]:
+def _load_predictions_source(predictions: object, predictions_path: str | None) -> dict[str, float]:
     if (predictions is None) == (predictions_path is None):
         raise InvalidRequest("Provide exactly one of `predictions` or `predictions_path`.")
     if predictions_path is not None:
         return _read_predictions_file(predictions_path)
-    return cast(dict[str, float], predictions)
+    if not isinstance(predictions, dict):
+        raise InvalidRequest("`predictions` must map each instrument_id to a prediction.")
+    mapping = cast(dict[Any, Any], predictions)
+    return _to_predictions(((str(k), v) for k, v in mapping.items()), "`predictions`")
+
+
+async def _open_round_exped(call: Call) -> str:
+    """Resolve the open futures round's exped instead of guessing when the API reports none."""
+    info = as_dict(await call.json(ep.FUTURES_CURRENT_INSTRUMENTS))
+    exped = info.get("exped")
+    if isinstance(exped, str) and exped.strip():
+        return exped
+    if isinstance(exped, int) and not isinstance(exped, bool):
+        return str(exped)
+    raise NotFound(
+        "Could not resolve the open futures round's exped: "
+        + f"{ep.FUTURES_CURRENT_INSTRUMENTS.path} returned exped={exped!r}.",
+        hint="No futures round may be open. Check `get_rounds(current_only=True)` or pass "
+        + "`exped` explicitly.",
+    )
+
+
+def _batch_status(failed: int, total: int) -> Literal["ok", "partial", "rejected"]:
+    if failed == 0:
+        return "ok"
+    return "rejected" if failed == total else "partial"
 
 
 # -- Read Operations ---------------------------------------------------------
@@ -399,10 +457,7 @@ async def submit_futures_predictions(
     """Submit Himalayas futures predictions (safe to re-submit while round window is open)."""
     preds = _load_predictions_source(predictions, predictions_path)
     check_prediction_range(preds, lo=0.0, hi=1.0)
-    resolved_exped = exped
-    if resolved_exped is None:
-        info = as_dict(await call.json(ep.FUTURES_CURRENT_INSTRUMENTS))
-        resolved_exped = str(info["exped"])
+    resolved_exped = exped if exped is not None else await _open_round_exped(call)
     body: dict[str, Any] = {
         "model_id": model_id,
         "exped": resolved_exped,
@@ -440,8 +495,7 @@ async def submit_futures_predictions_batch(
     """Submit futures predictions for 1-25 models with per-item outcome reporting."""
     default_exped = exped
     if default_exped is None and any(not item.get("exped") for item in items):
-        info = as_dict(await call.json(ep.FUTURES_CURRENT_INSTRUMENTS))
-        default_exped = str(info["exped"])
+        default_exped = await _open_round_exped(call)
 
     results: list[dict[str, Any]] = []
     failed = 0
@@ -467,7 +521,7 @@ async def submit_futures_predictions_batch(
             failed += 1
             results.append({"index": idx, "model_id": mid, "status": "error", "error": str(exc)})
     return BatchResult(
-        status="ok" if failed == 0 else "accepted",
+        status=_batch_status(failed, len(items)),
         items=results,
         failed=failed,
         all_succeeded=failed == 0,
@@ -767,7 +821,7 @@ async def submit_diagnostics_batch(
             failed += 1
             results.append({"index": idx, "model_id": mid, "status": "error", "error": str(exc)})
     return BatchResult(
-        status="ok" if failed == 0 else "accepted",
+        status=_batch_status(failed, len(items)),
         items=results,
         failed=failed,
         all_succeeded=failed == 0,

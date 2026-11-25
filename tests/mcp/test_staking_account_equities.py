@@ -1,20 +1,81 @@
 """MCP tests for `staking`, `account`, and `equities` toolsets."""
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import anyio
+import httpx2
 import pytest
+from mcp import Client
 from mcp.types import ElicitResult
 
 from mcp_server_everesteer.client import endpoints as ep
 from mcp_server_everesteer.config import Settings
+from mcp_server_everesteer.journal import Journal
 from tests.conftest import FakeApi
-from tests.mcp.helpers import call, session
+from tests.mcp.helpers import call, error, session
 
 pytestmark = pytest.mark.anyio
 
 WALLET = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 TX_HASH = "0x" + "ab" * 32
+WITHDRAWN = {"tx_id": "wd-1", "status": "submitted"}
+
+
+def _drop(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.ReadTimeout("dropped after sending", request=request)
+
+
+class Prompts:
+    """Elicitation callback that approves every prompt and remembers its text."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    async def __call__(self, _ctx: Any, params: Any) -> ElicitResult:
+        self.seen.append(str(params.message))
+        return ElicitResult(action="accept", content={"confirm": True})
+
+
+def _idempotency_keys(api: FakeApi) -> list[str]:
+    return [request.headers["idempotency-key"] for request in api.calls(ep.STAKING_WITHDRAW)]
+
+
+async def _withdraw_while_another_server_has_it_in_flight(
+    settings: Settings, api: FakeApi, prompts: Prompts
+) -> tuple[str, dict[str, Any]]:
+    """Hold one server's withdrawal POST open and repeat it from a second server meanwhile."""
+    in_flight, release = anyio.Event(), anyio.Event()
+    posts = 0
+
+    async def hold_the_first_post(_request: httpx2.Request) -> dict[str, str]:
+        nonlocal posts
+        posts += 1
+        if posts == 1:
+            in_flight.set()
+            await release.wait()
+        return WITHDRAWN
+
+    api.add(ep.STAKING_WITHDRAW, hold_the_first_post)
+    args = {"to_address": WALLET, "amount_usdc": "10", "idempotency_key": "wd-key-1"}
+    first: dict[str, Any] = {}
+    message = ""
+
+    async def withdraw_first(client: Client) -> None:
+        first.update(await call(client, "withdraw_usdc", **args))
+
+    with anyio.fail_after(30):
+        async with (
+            session(settings, api, elicitation_callback=prompts) as busy,
+            session(settings, api, elicitation_callback=prompts) as other,
+            anyio.create_task_group() as group,
+        ):
+            group.start_soon(withdraw_first, busy)
+            await in_flight.wait()
+            message = await error(other, "withdraw_usdc", **args)
+            release.set()
+    return message, first
 
 
 async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api: FakeApi) -> None:
@@ -78,6 +139,198 @@ async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api
         wd = await call(client, "withdraw_usdc", to_address=WALLET, amount_usdc="5.25")
         assert wd["data"]["tx_id"] == "wd-1"
         assert any("WITHDRAW 5.25 USDC" in msg for msg in prompts)
+
+
+async def test_identical_withdrawal_retry_after_a_timeout_reuses_the_idempotency_key(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    api.add(ep.STAKING_WITHDRAW, _drop, WITHDRAWN)
+
+    async with session(authed_settings, api, elicitation_callback=Prompts()) as client:
+        first = await call(client, "withdraw_usdc", to_address=WALLET, amount_usdc="10")
+        second = await call(client, "withdraw_usdc", to_address=WALLET, amount_usdc="10")
+
+    assert first["status"] == "unknown"
+    assert second["status"] == "ok"
+    keys = _idempotency_keys(api)
+    assert len(keys) == 2
+    assert keys[0] == keys[1]
+
+
+async def test_withdrawal_retry_with_the_same_key_is_sent_for_server_dedupe(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    api.add(ep.STAKING_WITHDRAW, _drop, WITHDRAWN)
+
+    async with session(authed_settings, api, elicitation_callback=Prompts()) as client:
+        args = {"to_address": WALLET, "amount_usdc": "10", "idempotency_key": "wd-key-1"}
+        assert (await call(client, "withdraw_usdc", **args))["status"] == "unknown"
+        assert (await call(client, "withdraw_usdc", **args))["status"] == "ok"
+
+    assert _idempotency_keys(api) == ["wd-key-1", "wd-key-1"]
+
+
+async def test_identical_withdrawal_in_flight_elsewhere_is_refused_and_not_sent(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+
+    message, first = await _withdraw_while_another_server_has_it_in_flight(
+        authed_settings, api, Prompts()
+    )
+
+    assert "is still in flight" in message
+    assert first["status"] == "ok"
+    assert _idempotency_keys(api) == ["wd-key-1"]
+
+
+async def test_identical_withdrawal_in_flight_elsewhere_is_refused_before_confirmation(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    prompts = Prompts()
+
+    message, _ = await _withdraw_while_another_server_has_it_in_flight(
+        authed_settings, api, prompts
+    )
+
+    assert "is still in flight" in message
+    assert len(prompts.seen) == 1
+
+
+async def test_withdrawal_retry_under_a_different_key_is_refused(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    api.add(ep.STAKING_WITHDRAW, _drop, WITHDRAWN)
+
+    async with session(authed_settings, api, elicitation_callback=Prompts()) as client:
+        args = {"to_address": WALLET, "amount_usdc": "10"}
+        await call(client, "withdraw_usdc", **args, idempotency_key="wd-key-1")
+        message = await error(client, "withdraw_usdc", **args, idempotency_key="wd-key-2")
+
+    assert "idempotency_key='wd-key-1'" in message
+    assert _idempotency_keys(api) == ["wd-key-1"]
+
+
+async def test_idempotent_withdrawal_retry_counts_once_toward_the_daily_cap(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    authed_settings.max_daily_usdc = Decimal("15")
+    api.add(ep.STAKING_WITHDRAW, _drop, WITHDRAWN)
+
+    async with session(authed_settings, api, elicitation_callback=Prompts()) as client:
+        assert (await call(client, "withdraw_usdc", to_address=WALLET, amount_usdc="10"))[
+            "status"
+        ] == "unknown"
+        retry = await call(client, "withdraw_usdc", to_address=WALLET, amount_usdc="10")
+
+    assert retry["status"] == "ok"
+    journal = Journal(authed_settings.resolved_journal_file)
+    try:
+        assert journal.spent_today("withdrawals") == Decimal("10")
+    finally:
+        journal.close()
+
+
+async def test_repeat_of_a_successful_withdrawal_is_refused_before_confirmation(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    api.add(ep.STAKING_WITHDRAW, WITHDRAWN)
+    prompts = Prompts()
+
+    async with session(authed_settings, api, elicitation_callback=prompts) as client:
+        await call(client, "withdraw_usdc", to_address=WALLET, amount_usdc="10")
+        message = await error(client, "withdraw_usdc", to_address=WALLET, amount_usdc="10")
+
+    assert "already succeeded" in message
+    assert len(prompts.seen) == 1
+    assert len(api.calls(ep.STAKING_WITHDRAW)) == 1
+
+
+async def test_disabling_a_stake_plan_is_sent_and_moves_no_usdc(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_staking = True
+    api.add(ep.STAKING_PLAN_SET, {"model_id": "m1", "enabled": False})
+    prompts = Prompts()
+
+    async with session(authed_settings, api, elicitation_callback=prompts) as client:
+        result = await call(client, "set_staking_plan", model_id="m1", enabled=False)
+
+    assert result["status"] == "ok"
+    assert api.json_body(ep.STAKING_PLAN_SET) == {"mode": "compound", "enabled": False}
+    assert prompts.seen == [
+        "Disable staking plan for model 'm1' (0 USDC (disable), mode=compound)?"
+    ]
+    journal = Journal(authed_settings.resolved_journal_file)
+    try:
+        assert journal.spent_today("staking") == Decimal(0)
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("stake_on_model", {"model_id": "m1", "amount_usdc": "150", "wallet_address": WALLET}),
+        ("set_staking_plan", {"model_id": "m1", "per_round_stake_usdc": "150"}),
+        ("set_stake_allocation", {"model": "m1", "amount_usdc": "150"}),
+        ("withdraw_usdc", {"to_address": WALLET, "amount_usdc": "150"}),
+    ],
+)
+async def test_money_limits_are_enforced_before_the_user_is_asked(
+    authed_settings: Settings, api: FakeApi, tool: str, arguments: dict[str, Any]
+) -> None:
+    authed_settings.allow_staking = True
+    authed_settings.allow_withdrawals = True
+    prompts = Prompts()
+
+    async with session(authed_settings, api, elicitation_callback=prompts) as client:
+        message = await error(client, tool, **arguments)
+
+    assert "exceeds EVERESTEER_MAX_" in message
+    assert prompts.seen == []
+    assert api.requests == []
+
+
+async def test_daily_cap_is_enforced_before_the_user_is_asked(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_staking = True
+    authed_settings.max_daily_usdc = Decimal("100")
+    api.add(ep.STAKING_STAKE, {"id": "stk-1", "status": "pending"})
+    prompts = Prompts()
+
+    async with session(authed_settings, api, elicitation_callback=prompts) as client:
+        args = {"model_id": "m1", "amount_usdc": "60", "wallet_address": WALLET}
+        await call(client, "stake_on_model", **args)
+        message = await error(client, "stake_on_model", **args)
+
+    assert "EVERESTEER_MAX_DAILY_USDC" in message
+    assert len(prompts.seen) == 1
+    assert len(api.calls(ep.STAKING_STAKE)) == 1
+
+
+async def test_dot_segment_ids_are_refused_before_any_request(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_staking = True
+    authed_settings.allow_withdrawals = True
+    api.add(ep.API_KEYS_REVOKE, {"revoked": True})
+    api.add(ep.STAKING_UNSTAKE, {"id": "stk-1", "status": "unstaking"})
+
+    async with session(authed_settings, api, elicitation_callback=Prompts()) as client:
+        revoke = await error(client, "revoke_api_key", key_id=".")
+        unstake = await error(client, "unstake_from_model", stake_id="..")
+
+    assert "`key_id`" in revoke
+    assert "`stake_id`" in unstake
+    assert api.requests == []
 
 
 async def test_account_and_equities_tools(
