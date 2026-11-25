@@ -1,11 +1,12 @@
 """USDC staking, Strategy contracts, per-model stake plans, event allocations, and withdrawals."""
 
-import uuid
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
 from mcp_server_everesteer.client import endpoints as ep
+from mcp_server_everesteer.config import Settings
 from mcp_server_everesteer.errors import InvalidRequest
 from mcp_server_everesteer.models import (
     ApiPayload,
@@ -22,10 +23,12 @@ from mcp_server_everesteer.money import (
 from mcp_server_everesteer.ops.registry import Call, ModelId, operation
 from mcp_server_everesteer.redaction import clean_label
 from mcp_server_everesteer.safety import (
-    check_daily_usdc,
+    Idempotency,
+    JournaledWrite,
     check_usdc_limit,
     fingerprint,
-    send_journaled_write,
+    preflight_write,
+    send_write,
 )
 
 WalletAddress = Annotated[
@@ -118,12 +121,34 @@ async def list_unconfirmed_writes(
 
 
 # -- Staking Writes (gate="staking") -----------------------------------------
+# `describe` runs the write's local checks before the user is asked to confirm it.
+
+
+def _stake_write(
+    call: Call, model_id: str, amount_usdc: str | int, wallet_address: str
+) -> tuple[int, JournaledWrite]:
+    micro = parse_usdc_to_micro(amount_usdc)
+    usd = micro_to_decimal(micro)
+    check_usdc_limit(call.settings.max_stake_usdc, usd, "Stake", "EVERESTEER_MAX_STAKE_USDC")
+    return micro, JournaledWrite(
+        tool_key="staking:stake_on_model",
+        endpoint=ep.STAKING_STAKE,
+        summary=f"stake {format_micro_usdc(micro)} USDC on {model_id}",
+        usdc=usd,
+        print_=fingerprint("staking:stake", model_id, micro, wallet_address.lower()),
+        body={
+            "model_id": model_id,
+            "amount_usdc": float(usd),
+            "wallet_address": wallet_address,
+        },
+    )
 
 
 async def _describe_stake(
-    _call: Call, model_id: str, amount_usdc: str | int, wallet_address: str
+    call: Call, model_id: str, amount_usdc: str | int, wallet_address: str
 ) -> str:
-    micro = parse_usdc_to_micro(amount_usdc)
+    micro, write = _stake_write(call, model_id, amount_usdc, wallet_address)
+    preflight_write(call, write)
     return (
         f"Stake {format_micro_usdc(micro)} USDC on model '{clean_label(model_id)}' "
         f"from wallet {wallet_address}?"
@@ -144,25 +169,9 @@ async def stake_on_model(
     wallet_address: WalletAddress,
 ) -> WriteResult:
     """Initiate a USDC stake on a model (requires ALLOW_STAKING + confirmation)."""
-    micro = parse_usdc_to_micro(amount_usdc)
-    usd = micro_to_decimal(micro)
-    check_usdc_limit(call.settings.max_stake_usdc, usd, "Stake", "EVERESTEER_MAX_STAKE_USDC")
-    check_daily_usdc(call, usd, "staking")
-    summary = f"stake {format_micro_usdc(micro)} USDC on {model_id}"
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:stake_on_model",
-        endpoint=ep.STAKING_STAKE,
-        summary=summary,
-        usdc=usd,
-        print_=fingerprint("staking:stake", model_id, micro, wallet_address.lower()),
-        body={
-            "model_id": model_id,
-            "amount_usdc": float(usd),
-            "wallet_address": wallet_address,
-        },
-    )
-    return unknown or WriteResult.from_raw(data, status="ok", message=f"Recorded: {summary}.")
+    _, write = _stake_write(call, model_id, amount_usdc, wallet_address)
+    data, unknown = await send_write(call, write)
+    return unknown or WriteResult.from_raw(data, status="ok", message=f"Recorded: {write.summary}.")
 
 
 @operation("Confirm on-chain stake", toolset="staking", requires=("api_key",), gate="staking")
@@ -178,7 +187,18 @@ async def confirm_stake(
     return WriteResult.from_raw(res, status="ok", message=f"Stake {stake_id} confirmed.")
 
 
-async def _describe_unstake(_call: Call, stake_id: str) -> str:
+def _unstake_write(stake_id: str) -> JournaledWrite:
+    return JournaledWrite(
+        tool_key="staking:unstake_from_model",
+        endpoint=ep.STAKING_UNSTAKE,
+        summary=f"unstake {stake_id}",
+        path_args={"stake_id": stake_id},
+        print_=fingerprint("staking:unstake", stake_id),
+    )
+
+
+async def _describe_unstake(call: Call, stake_id: str) -> str:
+    preflight_write(call, _unstake_write(stake_id))
     return f"Request unstake for stake '{clean_label(stake_id)}'?"
 
 
@@ -193,18 +213,22 @@ async def unstake_from_model(
     call: Call, stake_id: Annotated[str, Field(min_length=1)]
 ) -> WriteResult:
     """Initiate unstaking USDC for a stake ID."""
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:unstake_from_model",
-        endpoint=ep.STAKING_UNSTAKE,
-        summary=f"unstake {stake_id}",
-        path_args={"stake_id": stake_id},
-        print_=fingerprint("staking:unstake", stake_id),
-    )
+    data, unknown = await send_write(call, _unstake_write(stake_id))
     return unknown or WriteResult.from_raw(data, status="ok", message=f"Unstaked {stake_id}.")
 
 
-async def _describe_claim(_call: Call, model_id: str, round_id: str) -> str:
+def _claim_write(model_id: str, round_id: str) -> JournaledWrite:
+    return JournaledWrite(
+        tool_key="staking:claim_payout",
+        endpoint=ep.STAKING_CLAIM,
+        summary=f"claim payout {model_id} round {round_id}",
+        body={"model_id": model_id, "round_id": round_id},
+        print_=fingerprint("staking:claim", model_id, round_id),
+    )
+
+
+async def _describe_claim(call: Call, model_id: str, round_id: str) -> str:
+    preflight_write(call, _claim_write(model_id, round_id))
     return f"Claim resolved payout for model '{clean_label(model_id)}' on round {round_id}?"
 
 
@@ -221,21 +245,52 @@ async def claim_payout(
     round_id: Annotated[str, Field(min_length=1)],
 ) -> WriteResult:
     """Claim resolved USDC payout for a model and round."""
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:claim_payout",
-        endpoint=ep.STAKING_CLAIM,
-        summary=f"claim payout {model_id} round {round_id}",
-        body={"model_id": model_id, "round_id": round_id},
-        print_=fingerprint("staking:claim", model_id, round_id),
-    )
+    data, unknown = await send_write(call, _claim_write(model_id, round_id))
     return unknown or WriteResult.from_raw(data, status="ok", message="Payout claimed.")
 
 
-async def _describe_relay_stake(_call: Call, model_id: str) -> str:
+def _relay_charge(settings: Settings) -> Decimal | None:
+    """USDC a relay counts toward the daily staking cap, since only the forwarder knows it.
+
+    A relay counts as the largest stake one call may move (`EVERESTEER_MAX_STAKE_USDC`), or as
+    the whole daily cap when that limit is `unlimited`. A limit of 0 refuses relays like stakes.
+    """
+    per_call = settings.max_stake_usdc
+    check_usdc_limit(per_call, Decimal(0), "Relaying a stake", "EVERESTEER_MAX_STAKE_USDC")
+    if per_call != "unlimited":
+        return per_call
+    daily = settings.max_daily_usdc
+    if daily == "unlimited":
+        return None
+    check_usdc_limit(daily, Decimal(0), "Relaying a stake", "EVERESTEER_MAX_DAILY_USDC")
+    return daily
+
+
+def _relay_stake_write(call: Call, model_id: str) -> JournaledWrite:
+    charge = _relay_charge(call.settings)
+    counted = "" if charge is None else f" (counted as {charge:.2f} USDC)"
+    return JournaledWrite(
+        tool_key="staking:relay_stake",
+        endpoint=ep.STAKING_RELAY_STAKE,
+        summary=f"relay stake for {model_id}{counted}",
+        usdc=charge,
+        body={"model_id": model_id},
+        print_=fingerprint("staking:relay_stake", model_id),
+    )
+
+
+async def _describe_relay_stake(call: Call, model_id: str) -> str:
+    write = _relay_stake_write(call, model_id)
+    preflight_write(call, write)
+    counted = (
+        ""
+        if write.usdc is None
+        else f" The amount is only known on-chain, so this counts as {write.usdc:.2f} USDC "
+        + "toward today's staking cap."
+    )
     return (
         f"Relay forwarder USDC balance into the staking contract for model "
-        f"'{clean_label(model_id)}'?"
+        f"'{clean_label(model_id)}'?{counted}"
     )
 
 
@@ -248,18 +303,22 @@ async def _describe_relay_stake(_call: Call, model_id: str) -> str:
 )
 async def relay_stake(call: Call, model_id: ModelId) -> WriteResult:
     """Forward deposited USDC from your CREATE2 forwarder to the staking contract."""
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:relay_stake",
-        endpoint=ep.STAKING_RELAY_STAKE,
-        summary=f"relay stake for {model_id}",
-        body={"model_id": model_id},
-        print_=fingerprint("staking:relay_stake", model_id),
-    )
+    data, unknown = await send_write(call, _relay_stake_write(call, model_id))
     return unknown or WriteResult.from_raw(data, status="ok", message="Stake relayed.")
 
 
-async def _describe_relay_claim(_call: Call, round_id: int) -> str:
+def _relay_claim_write(round_id: int) -> JournaledWrite:
+    return JournaledWrite(
+        tool_key="staking:relay_claim",
+        endpoint=ep.STAKING_RELAY_CLAIM,
+        summary=f"relay claim round {round_id}",
+        body={"round_id": round_id},
+        print_=fingerprint("staking:relay_claim", round_id),
+    )
+
+
+async def _describe_relay_claim(call: Call, round_id: int) -> str:
+    preflight_write(call, _relay_claim_write(round_id))
     return f"Relay claim payout for resolved round {round_id}?"
 
 
@@ -272,14 +331,7 @@ async def _describe_relay_claim(_call: Call, round_id: int) -> str:
 )
 async def relay_claim(call: Call, round_id: Annotated[int, Field(ge=1)]) -> WriteResult:
     """Relay payout claim from a resolved round via the CREATE2 forwarder."""
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:relay_claim",
-        endpoint=ep.STAKING_RELAY_CLAIM,
-        summary=f"relay claim round {round_id}",
-        body={"round_id": round_id},
-        print_=fingerprint("staking:relay_claim", round_id),
-    )
+    data, unknown = await send_write(call, _relay_claim_write(round_id))
     return unknown or WriteResult.from_raw(data, status="ok", message="Claim relayed.")
 
 
@@ -314,8 +366,58 @@ def _resolve_plan_amounts(
     return c_micro, s_micro, c_micro or s_micro or 0
 
 
+def _plan_write(
+    call: Call,
+    *,
+    model_id: str,
+    mode: str,
+    enabled: bool,
+    commitment_micro: int | None,
+    commitment_usdc: str | int | None,
+    per_round_stake_micro: int | None,
+    per_round_stake_usdc: str | int | None,
+) -> tuple[str, JournaledWrite]:
+    """Build a plan write and its prompt detail; a plan without an amount moves no USDC."""
+    c_micro, s_micro, effective_micro = _resolve_plan_amounts(
+        commitment_micro=commitment_micro,
+        commitment_usdc=commitment_usdc,
+        per_round_stake_micro=per_round_stake_micro,
+        per_round_stake_usdc=per_round_stake_usdc,
+        enabled=enabled,
+    )
+    usd = micro_to_decimal(effective_micro) if effective_micro > 0 else None
+    if usd is not None:
+        check_usdc_limit(
+            call.settings.max_stake_usdc, usd, "Stake plan", "EVERESTEER_MAX_STAKE_USDC"
+        )
+    body: dict[str, Any] = {"mode": mode, "enabled": enabled}
+    if c_micro is not None:
+        body["commitment_micro"] = c_micro
+        detail = f"{format_micro_usdc(c_micro)} USDC total commitment"
+    elif s_micro is not None:
+        body["per_round_stake_micro"] = s_micro
+        detail = f"{format_micro_usdc(s_micro)} USDC/round"
+    else:
+        detail = "0 USDC (disable)"
+    write = JournaledWrite(
+        tool_key="staking:set_staking_plan",
+        endpoint=ep.STAKING_PLAN_SET,
+        path_args={"model_id": model_id},
+        summary=(
+            f"plan {model_id} enabled={enabled} mode={mode} "
+            f"({format_micro_usdc(effective_micro)} USDC)"
+        ),
+        usdc=usd,
+        print_=fingerprint("staking:plan", model_id, mode, enabled, c_micro, s_micro),
+        body=body,
+        plan_key=model_id,
+        per_round=enabled and s_micro is not None,
+    )
+    return detail, write
+
+
 async def _describe_staking_plan(
-    _call: Call,
+    call: Call,
     model_id: str,
     mode: str = "compound",
     enabled: bool = True,
@@ -324,22 +426,27 @@ async def _describe_staking_plan(
     per_round_stake_micro: int | None = None,
     per_round_stake_usdc: str | int | None = None,
 ) -> str:
-    c_micro, s_micro, _ = _resolve_plan_amounts(
+    detail, write = _plan_write(
+        call,
+        model_id=model_id,
+        mode=mode,
+        enabled=enabled,
         commitment_micro=commitment_micro,
         commitment_usdc=commitment_usdc,
         per_round_stake_micro=per_round_stake_micro,
         per_round_stake_usdc=per_round_stake_usdc,
-        enabled=enabled,
     )
-    label = clean_label(model_id)
-    if c_micro is not None:
-        detail = f"{format_micro_usdc(c_micro)} USDC total commitment"
-    elif s_micro is not None:
-        detail = f"{format_micro_usdc(s_micro)} USDC/round"
-    else:
-        detail = "0 USDC (disable)"
+    preflight_write(call, write)
     action = "Enable" if enabled else "Disable"
-    return f"{action} staking plan for model '{label}' ({detail}, mode={mode})?"
+    recurring = (
+        " Its per-round stake counts toward the daily staking cap on every UTC day while enabled."
+        if write.per_round
+        else ""
+    )
+    return (
+        f"{action} staking plan for model '{clean_label(model_id)}' ({detail}, mode={mode})?"
+        f"{recurring}"
+    )
 
 
 @operation(
@@ -373,39 +480,17 @@ async def set_staking_plan(
     ] = None,
 ) -> WriteResult:
     """Create or update a per-model Staking v2 plan (`constant` or `compound`)."""
-    c_micro, s_micro, effective_micro = _resolve_plan_amounts(
+    _, write = _plan_write(
+        call,
+        model_id=model_id,
+        mode=mode,
+        enabled=enabled,
         commitment_micro=commitment_micro,
         commitment_usdc=commitment_usdc,
         per_round_stake_micro=per_round_stake_micro,
         per_round_stake_usdc=per_round_stake_usdc,
-        enabled=enabled,
     )
-    usd = micro_to_decimal(effective_micro)
-    if effective_micro > 0:
-        check_usdc_limit(
-            call.settings.max_stake_usdc, usd, "Stake plan", "EVERESTEER_MAX_STAKE_USDC"
-        )
-        check_daily_usdc(call, usd, "staking")
-
-    body: dict[str, Any] = {"mode": mode, "enabled": enabled}
-    if c_micro is not None:
-        body["commitment_micro"] = c_micro
-    if s_micro is not None:
-        body["per_round_stake_micro"] = s_micro
-
-    summary = (
-        f"plan {model_id} enabled={enabled} mode={mode} ({format_micro_usdc(effective_micro)} USDC)"
-    )
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:set_staking_plan",
-        endpoint=ep.STAKING_PLAN_SET,
-        path_args={"model_id": model_id},
-        summary=summary,
-        usdc=usd,
-        print_=fingerprint("staking:plan", model_id, mode, enabled, c_micro, s_micro),
-        body=body,
-    )
+    data, unknown = await send_write(call, write)
     return unknown or WriteResult.from_raw(
         data,
         status="accepted" if enabled else "ok",
@@ -413,14 +498,41 @@ async def set_staking_plan(
     )
 
 
+def _allocation_write(
+    call: Call,
+    model: str,
+    amount_micro: int | None,
+    amount_usdc: str | int | None,
+    window: str | None,
+) -> tuple[int, JournaledWrite]:
+    micro = resolve_usdc_micro(amount_micro=amount_micro, amount_usdc=amount_usdc)
+    usd = micro_to_decimal(micro)
+    check_usdc_limit(
+        call.settings.max_stake_usdc, usd, "Event stake draft", "EVERESTEER_MAX_STAKE_USDC"
+    )
+    body: dict[str, Any] = {"amount_micro": micro}
+    if window is not None:
+        body["window"] = window
+    return micro, JournaledWrite(
+        tool_key="staking:set_stake_allocation",
+        endpoint=ep.EVENT_STAKING_ALLOC_SET,
+        path_args={"model": model},
+        summary=f"draft {format_micro_usdc(micro)} USDC on {model}",
+        usdc=usd,
+        print_=fingerprint("event_alloc", model, micro, window),
+        body=body,
+    )
+
+
 async def _describe_event_alloc(
-    _call: Call,
+    call: Call,
     model: str,
     amount_micro: int | None = None,
     amount_usdc: str | int | None = None,
     window: str | None = None,
 ) -> str:
-    micro = resolve_usdc_micro(amount_micro=amount_micro, amount_usdc=amount_usdc)
+    micro, write = _allocation_write(call, model, amount_micro, amount_usdc, window)
+    preflight_write(call, write)
     win = f" in window '{clean_label(window)}'" if window else ""
     return (
         f"Draft event stake allocation of {format_micro_usdc(micro)} USDC ({micro} micro-USDC) "
@@ -452,29 +564,10 @@ async def set_stake_allocation(
     ] = None,
 ) -> WriteResult:
     """Create or replace an off-chain event stake draft (locked immutably when round opens)."""
-    micro = resolve_usdc_micro(amount_micro=amount_micro, amount_usdc=amount_usdc)
-    usd = micro_to_decimal(micro)
-    check_usdc_limit(
-        call.settings.max_stake_usdc, usd, "Event stake draft", "EVERESTEER_MAX_STAKE_USDC"
-    )
-    check_daily_usdc(call, usd, "staking")
-
-    body: dict[str, Any] = {"amount_micro": micro}
-    if window is not None:
-        body["window"] = window
-    summary = f"draft {format_micro_usdc(micro)} USDC on {model}"
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="staking:set_stake_allocation",
-        endpoint=ep.EVENT_STAKING_ALLOC_SET,
-        path_args={"model": model},
-        summary=summary,
-        usdc=usd,
-        print_=fingerprint("event_alloc", model, micro, window),
-        body=body,
-    )
+    _, write = _allocation_write(call, model, amount_micro, amount_usdc, window)
+    data, unknown = await send_write(call, write)
     return unknown or WriteResult.from_raw(
-        data, status="ok", message=f"Event draft saved: {summary}."
+        data, status="ok", message=f"Event draft saved: {write.summary}."
     )
 
 
@@ -501,13 +594,36 @@ async def withdraw_stake_allocation(
 # -- Withdrawals (gate="withdrawals", mandatory human confirmation) ----------
 
 
+def _withdraw_write(
+    call: Call, to_address: str, amount_usdc: str | int, idempotency_key: str | None
+) -> tuple[int, JournaledWrite]:
+    micro = parse_usdc_to_micro(amount_usdc)
+    usd = micro_to_decimal(micro)
+    check_usdc_limit(
+        call.settings.max_withdraw_usdc,
+        usd,
+        "Withdrawal",
+        "EVERESTEER_MAX_WITHDRAW_USDC",
+    )
+    return micro, JournaledWrite(
+        tool_key="withdrawals:withdraw_usdc",
+        endpoint=ep.STAKING_WITHDRAW,
+        summary=f"withdraw {format_micro_usdc(micro)} USDC to {to_address}",
+        usdc=usd,
+        print_=fingerprint("withdraw", to_address.lower(), micro),
+        body={"to_address": to_address, "amount_usdc": float(usd)},
+        idempotency=Idempotency(requested=idempotency_key or None),
+    )
+
+
 async def _describe_withdraw(
-    _call: Call,
+    call: Call,
     to_address: str,
     amount_usdc: str | int,
-    **_unused: Any,
+    idempotency_key: str | None = None,
 ) -> str:
-    micro = parse_usdc_to_micro(amount_usdc)
+    micro, write = _withdraw_write(call, to_address, amount_usdc, idempotency_key)
+    preflight_write(call, write)
     return (
         f"WITHDRAW {format_micro_usdc(micro)} USDC to verified wallet {to_address}? "
         "This moves funds on-chain and cannot be undone."
@@ -529,32 +645,17 @@ async def withdraw_usdc(
     amount_usdc: UsdcAmount,
     idempotency_key: Annotated[
         str | None,
-        Field(description="Optional Idempotency-Key header; fresh UUID4 generated if omitted."),
+        Field(
+            description=(
+                "Optional Idempotency-Key header. If omitted, a retry of an identical withdrawal "
+                "whose outcome is unknown reuses that attempt's key; otherwise a fresh UUID4."
+            )
+        ),
     ] = None,
 ) -> WriteResult:
     """Withdraw USDC to verified destination wallet (requires ALLOW_WITHDRAWALS + confirmation)."""
-    micro = parse_usdc_to_micro(amount_usdc)
-    usd = micro_to_decimal(micro)
-    check_usdc_limit(
-        call.settings.max_withdraw_usdc,
-        usd,
-        "Withdrawal",
-        "EVERESTEER_MAX_WITHDRAW_USDC",
-    )
-    check_daily_usdc(call, usd, "withdrawals")
-
-    idem = idempotency_key or str(uuid.uuid4())
-    summary = f"withdraw {format_micro_usdc(micro)} USDC to {to_address}"
-    data, unknown = await send_journaled_write(
-        call,
-        tool_key="withdrawals:withdraw_usdc",
-        endpoint=ep.STAKING_WITHDRAW,
-        summary=summary,
-        usdc=usd,
-        print_=fingerprint("withdraw", to_address.lower(), micro, idem),
-        body={"to_address": to_address, "amount_usdc": float(usd)},
-        headers={"Idempotency-Key": idem},
-    )
+    _, write = _withdraw_write(call, to_address, amount_usdc, idempotency_key)
+    data, unknown = await send_write(call, write)
     return unknown or WriteResult.from_raw(
-        data, status="ok", message=f"Withdrawal submitted: {summary}."
+        data, status="ok", message=f"Withdrawal submitted: {write.summary}."
     )

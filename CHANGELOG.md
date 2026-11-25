@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `withdraw_usdc` no longer sends an identical retry of a timed-out withdrawal under a fresh `Idempotency-Key`. The key is left out of the duplicate fingerprint and stored in the journal; a retry of a `pending` or `unknown` withdrawal reuses it and counts once toward the daily cap, a retry under a different key is refused, and so is a repeat of an identical withdrawal that already succeeded within 15 minutes.
+- `set_staking_plan(enabled=False)` no longer fails after confirmation; a plan without an amount records no USDC movement.
+- Per-call limits, the daily cap, the duplicate guard, and path arguments are checked before the confirmation prompt, so a confirmed write is not refused by a check that could have run first.
+- The daily USDC cap is checked and the write recorded in one `BEGIN IMMEDIATE` SQLite transaction, so server processes sharing a journal cannot overshoot `EVERESTEER_MAX_DAILY_USDC`. `relay_stake` counts as `EVERESTEER_MAX_STAKE_USDC` (the whole daily cap when that limit is `unlimited`; refused when it is `0`), and a per-round stake plan counts on every UTC day while it is in force. Journals created by 0.1.1 are upgraded in place.
 - Downloads stream into a temporary file next to the target, are fsynced and validated (`PAR1` magic for parquet, a zip header for `split="bulk"`, no HTML or JSON pages), and only then replace the target, so a failed download keeps the previous file. Output paths must resolve, symlinks included, inside `EVERESTEER_DOWNLOAD_DIR` (new, `os.pathsep`-separated, environment only; default: the working directory).
 - A Cloudflare Access login redirect on a download raises `CloudflareAccessError` instead of being followed and saved.
 - Empty, `.` and `..` path arguments are refused instead of collapsing into another route (for example `revoke_api_key(key_id=".")` became `DELETE /api/v1/agents/keys`).

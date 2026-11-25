@@ -34,7 +34,7 @@ Follow what happens when an agent calls `download_job_artifact` or `stake_on_mod
    - Attaches a shared `Runtime` (holding `Settings`, `EveresteerClient`, per-account `JsonCache`, and lazy `Journal`), a monotonic progress reporter, and any client timeout budget (`wait_cap`).
    - Long-running operations (`submit_validation_diagnostics`, `submit_event_predictions`, `train_model`) share a single polling engine (`Call.poll_until`) powered by a single clock source (`base.monotonic()` / `base.sleep()`).
 3. **Preflight Safety & Journal (`safety.py` & `journal.py`)**
-   - For financial/quota operations, `safety.py` enforces exact USDC caps, checks daily UTC spend totals in SQLite, verifies no identical `pending`/`unknown` fingerprint is already open, records the intent row, and fires **one** HTTP call without retry.
+   - For financial/quota operations, `safety.py` enforces exact USDC caps, checks daily UTC spend totals in SQLite, verifies no identical `pending`/`unknown` fingerprint is already open, records the intent row, and fires **one** HTTP call without retry. The checks run once before the confirmation prompt (`preflight_write`) and again with the insert inside one `BEGIN IMMEDIATE` transaction (`send_write`), so separate server processes sharing the journal cannot overshoot the daily cap.
 4. **Protocol Transport (`client/base.py` & `client/retry.py`)**
    - Every HTTP route must exist as an `Endpoint` constant in [client/endpoints.py](../src/mcp_server_everesteer/client/endpoints.py).
    - Safe routes (`safe_to_retry=True`, i.e., `GET` and read-only `validate_futures_submission`) use `RETRY_SAFE` with exponential backoff and `Retry-After` support.
