@@ -196,8 +196,13 @@ async def test_compete_reads_submissions_and_diagnostics(
 
 
 async def test_compute_pricing_training_wait_cap_and_artifacts(
-    authed_settings: Settings, api: FakeApi, clock: FakeClock, tmp_path: Path
+    authed_settings: Settings,
+    api: FakeApi,
+    clock: FakeClock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     authed_settings.allow_writes = True
 
     api.add(ep.COMPUTE_MODELS, {"templates": ["lightgbm", "xgboost"]})

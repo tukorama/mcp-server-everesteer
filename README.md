@@ -500,12 +500,14 @@ All settings use the `EVERESTEER_` prefix. Security-critical settings (keys, bas
 | `EVERESTEER_CREDENTIALS_FILE` | `~/.config/mcp-server-everesteer/credentials.json` | Stored API key (`0600`) |
 | `EVERESTEER_JOURNAL_FILE` | `~/.config/mcp-server-everesteer/journal.sqlite3` | Local SQLite write journal (`0600`) |
 | `EVERESTEER_CACHE_DIR` | `~/.cache/mcp-server-everesteer` | Per-account catalog/schema cache |
+| `EVERESTEER_DOWNLOAD_DIR` | working directory | Directories that download tools may write into, separated by `os.pathsep` (`:` on macOS/Linux, `;` on Windows). Relative `output_path` values and default file names land in the first one |
 | `EVERESTEER_HTTP_BEARER_TOKEN` | | Required for `serve --transport streamable-http` on non-loopback hosts |
 | `EVERESTEER_LOG_LEVEL` | `INFO` | Stderr logging level (`stdout` stays pure MCP JSON-RPC) |
 
 ## Behavior & Limitations
 
 - **Presigned credential isolation:** S3/CloudFront presigned downloads and uploads run on a credential-free `httpx2.AsyncClient` so `X-API-Key` and `CF-Access-Client-Secret` are never forwarded to third-party storage hosts.
+- **Confined, atomic downloads:** `download_dataset`, `download_benchmark`, `download_ai_model`, and `download_job_artifact` only write inside `EVERESTEER_DOWNLOAD_DIR` (default: the server's working directory). Symlinks are resolved before that check, and `..` segments and symlinked target files are refused. The body streams into a temporary file next to the target, is fsynced, must look like the expected artifact (`PAR1` magic for parquet, a zip header for `split="bulk"`, never an HTML or JSON page or a Cloudflare Access login), and only then replaces the target, so a failed download keeps the previous file. The returned `path` is the resolved absolute path. Set `EVERESTEER_DOWNLOAD_DIR` explicitly if your MCP client starts servers in `/` or your home directory, since the default root is then that whole tree.
 - **No blind write retries:** Only safe `GET` reads (and read-only `validate_futures_submission`) retry with backoff + `Retry-After`. Mutating requests never auto-retry.
 - **Zero local plotting or ML execution:** `plotnine`, `matplotlib`, `pandas`, `numpy`, and `scipy` are intentionally excluded. Download parquet splits via `download_dataset`, build models in your local environment, and pass the `.pkl` / `.parquet` path back to this control plane.
 - **Secret hygiene:** `eiq_*`, `whsec_*`, `CF-Access-Client-Secret`, `Authorization` headers, and registered secrets are masked from logs and tool errors; untrusted remote strings are stripped of control and Unicode bidirectional override characters.

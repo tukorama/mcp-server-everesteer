@@ -42,7 +42,7 @@ Follow what happens when an agent calls `download_job_artifact` or `stake_on_mod
    - HTTP responses that contain HTML instead of API JSON are inspected (`_looks_like_cloudflare_html`) and turned into actionable `CloudflareAccessError` hints.
 5. **Credential-Free Presigned Storage (`client/base.py` & `client/transfer.py`)**
    - Large `.parquet` downloads and `.pkl` uploads redirect to S3/CloudFront using a **separate credential-free `httpx2.AsyncClient`** (`self._cdn_http`) that never sends `X-API-Key` or `CF-Access-Client-Secret`.
-   - Local writes verify path traversal (`safe_output_path`) and refuse symlinks (`O_NOFOLLOW` on POSIX / `lstat` check).
+   - Local writes are confined to `EVERESTEER_DOWNLOAD_DIR` (default: the working directory) after resolving symlinks (`confine_output_path`), stream into a temporary file, are checked against the expected artifact (`PAR1` magic, zip header, no HTML/JSON pages), fsynced, and then moved over the target with `os.replace` (`StagedDownload`).
 
 ---
 

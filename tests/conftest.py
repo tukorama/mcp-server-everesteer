@@ -19,6 +19,11 @@ from mcp_server_everesteer.config import Settings
 SEEN: set[str] = set()
 
 
+def parquet_bytes(payload: bytes) -> bytes:
+    """Frame `payload` with the `PAR1` magic bytes every parquet file starts and ends with."""
+    return b"PAR1" + payload + b"PAR1"
+
+
 class FakeApi:
     """Scripted Everesteer API + presigned CDN/S3 MockTransport responder."""
 

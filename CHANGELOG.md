@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Downloads stream into a temporary file next to the target, are fsynced and validated (`PAR1` magic for parquet, a zip header for `split="bulk"`, no HTML or JSON pages), and only then replace the target, so a failed download keeps the previous file. Output paths must resolve, symlinks included, inside `EVERESTEER_DOWNLOAD_DIR` (new, `os.pathsep`-separated, environment only; default: the working directory).
+- A Cloudflare Access login redirect on a download raises `CloudflareAccessError` instead of being followed and saved.
+- Empty, `.` and `..` path arguments are refused instead of collapsing into another route (for example `revoke_api_key(key_id=".")` became `DELETE /api/v1/agents/keys`).
+
 ## [0.1.1] - 2026-11-19
 
 ### Added

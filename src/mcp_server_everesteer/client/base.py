@@ -22,9 +22,12 @@ from mcp_server_everesteer.client.retry import (
     parse_retry_after,
 )
 from mcp_server_everesteer.client.transfer import (
+    DownloadKind,
+    StagedDownload,
+    body_problem,
+    confine_output_path,
+    media_problem,
     read_file_bytes,
-    safe_output_path,
-    write_bytes_no_symlink,
 )
 from mcp_server_everesteer.config import Settings
 from mcp_server_everesteer.errors import (
@@ -33,6 +36,7 @@ from mcp_server_everesteer.errors import (
     ConflictError,
     DeadlineExceeded,
     EmailVerificationRequired,
+    EveresteerError,
     InvalidRequest,
     NetworkError,
     NotFound,
@@ -47,6 +51,7 @@ logger = logging.getLogger(__name__)
 _sleep = asyncio.sleep
 _monotonic = time.monotonic
 _now = time.time
+_CHUNK_BYTES = 1 << 20
 
 
 def monotonic() -> float:
@@ -145,6 +150,27 @@ def _is_cloudflare_access_challenge(status: int, text: str, headers: httpx2.Head
         or "cf-access" in low
         or "accessdenied" in low
     )
+
+
+def _reached_cloudflare_access(response: httpx2.Response) -> bool:
+    """Return whether a followed redirect chain ended on a Cloudflare Access login."""
+    return "cdn-cgi/access" in str(response.url).lower() or any(
+        _is_cloudflare_access_challenge(hop.status_code, "", hop.headers)
+        for hop in response.history
+    )
+
+
+def _invalid_download(label: str, problem: str, preview: str, status: int) -> EveresteerError:
+    message = f"{label} returned {problem}; nothing was saved and any previous file was kept."
+    low = preview.lower()
+    if "cloudflare access" in low or "cdn-cgi/access" in low or "cf-access" in low:
+        return CloudflareAccessError(
+            message,
+            status=status,
+            detail=preview,
+            hint="Set CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET or check EVERESTEER_BASE_URL.",
+        )
+    return ServerError(message, status=status, detail=preview, hint="Retry the download later.")
 
 
 class EveresteerClient:
@@ -257,6 +283,38 @@ class EveresteerClient:
             return raw_body
         return None if body is None else encode_body(body)
 
+    async def _send(
+        self,
+        endpoint: Endpoint,
+        path: str,
+        *,
+        query: list[tuple[str, str]],
+        content: bytes | None,
+        files: Mapping[str, Any] | None,
+        data: Mapping[str, Any] | None,
+        headers: dict[str, str],
+        seconds: float,
+        stream: bool,
+    ) -> httpx2.Response:
+        """Send one attempt. With ``stream``, only a 2xx body is left unread for the caller."""
+        request = self._http.build_request(
+            endpoint.method,
+            path,
+            params=cast(Any, query) or None,
+            content=content,
+            files=cast(Any, files),
+            data=cast(Any, data),
+            headers=headers,
+            timeout=seconds,
+        )
+        response = await self._http.send(request, stream=stream)
+        if stream and not response.is_success:
+            try:
+                await response.aread()
+            finally:
+                await response.aclose()
+        return response
+
     async def request(
         self,
         endpoint: Endpoint,
@@ -271,8 +329,12 @@ class EveresteerClient:
         deadline: float | None = None,
         expect: tuple[int, ...] = (),
         allow_redirect: bool = False,
+        stream: bool = False,
     ) -> httpx2.Response:
-        """Execute one API request. Never auto-retries mutating operations."""
+        """Execute one API request. Never auto-retries mutating operations.
+
+        With ``stream=True`` a 2xx body is left unread and the caller must close the response.
+        """
         if _coverage_hook is not None:
             _coverage_hook(endpoint)
         path = endpoint.render(path_args)
@@ -290,15 +352,16 @@ class EveresteerClient:
             timeout = self._request_timeout(label, endpoint, deadline, maybe_sent=maybe_sent)
 
             try:
-                response = await self._http.request(
-                    endpoint.method,
+                response = await self._send(
+                    endpoint,
                     path,
-                    params=cast(Any, query) or None,
+                    query=query,
                     content=content,
-                    files=cast(Any, files),
-                    data=cast(Any, data),
+                    files=files,
+                    data=data,
                     headers=request_headers,
-                    timeout=timeout,
+                    seconds=timeout,
+                    stream=stream,
                 )
             except (httpx2.TransportError, httpx2.DecodingError) as exc:
                 reached = not isinstance(exc, httpx2.ConnectError | httpx2.ConnectTimeout)
@@ -335,11 +398,18 @@ class EveresteerClient:
                 wait_s = clamp(retry_after, 0.5, 15.0) if retry_after else backoff(server_failures)
                 await self._pause(label, deadline, wait_s, maybe_sent=maybe_sent)
                 continue
-            if allow_redirect and response.has_redirect_location:
+            if allow_redirect and self._followable_redirect(response):
                 return response
             if status >= 300 and status not in expect:
                 self._raise_for_status(label, response, endpoint)
             return response
+
+    @staticmethod
+    def _followable_redirect(response: httpx2.Response) -> bool:
+        """Return whether a redirect may be followed, i.e. it is not a Cloudflare Access login."""
+        return response.has_redirect_location and not _is_cloudflare_access_challenge(
+            response.status_code, response.text, response.headers
+        )
 
     def _raise_for_status(self, label: str, response: httpx2.Response, endpoint: Endpoint) -> None:
         status = response.status_code
@@ -419,17 +489,28 @@ class EveresteerClient:
             )
         return parsed
 
+    def download_target(self, output_path: str, *, server_supplied: bool = False) -> Path:
+        """Resolve a destination inside the EVERESTEER_DOWNLOAD_DIR directories (default: cwd)."""
+        return confine_output_path(
+            output_path, self.settings.download_roots, server_supplied=server_supplied
+        )
+
     async def download_presigned(
         self,
         endpoint: Endpoint,
         output_path: str,
         *,
+        kind: DownloadKind,
         path_args: dict[str, str] | None = None,
         params: Params = None,
         deadline: float | None = None,
     ) -> tuple[str, int]:
-        """Download via `?presigned=true` using a credential-free CDN request on 302."""
-        safe_path = safe_output_path(output_path)
+        """Download via `?presigned=true`, following a 302 with a credential-free CDN request.
+
+        The body streams into a temporary file that replaces `output_path` only once it is
+        complete and looks like `kind`, so a failed download never damages the previous file.
+        """
+        target = self.download_target(output_path)
         query_params = dict(params or {})
         query_params["presigned"] = "true"
         response = await self.request(
@@ -438,47 +519,86 @@ class EveresteerClient:
             params=query_params,
             deadline=deadline,
             allow_redirect=True,
+            stream=True,
         )
-        if response.has_redirect_location:
-            target_url = str(response.url.join(response.headers["location"]))
-            data = await self.download_url_bytes(target_url, deadline=deadline)
-        else:
-            data = response.content
-        written = await asyncio.to_thread(write_bytes_no_symlink, safe_path, data)
-        return str(safe_path), written
-
-    async def download_url_bytes(self, url: str, *, deadline: float | None = None) -> bytes:
-        """Fetch raw bytes from a presigned URL without sending API credentials."""
-        timeout = self.settings.upload_timeout
-        if deadline is not None:
-            timeout = max(min(timeout, deadline - _monotonic()), 0.5)
         try:
-            response = await self._cdn_http.get(url, timeout=timeout)
-        except httpx2.TransportError as exc:
-            raise NetworkError(
-                f"Failed to download artifact from storage ({type(exc).__name__}).",
-                hint="Retry the download or regenerate the presigned URL if it expired.",
-            ) from exc
-        if response.status_code >= 400:
-            raise ServerError(
-                f"Storage download returned HTTP {response.status_code}.",
-                status=response.status_code,
-                detail=response.text[:200],
-            )
-        return response.content
+            if not response.has_redirect_location:
+                label = f"{endpoint.method} {endpoint.path}"
+                return await self._save(response, target, kind=kind, label=label)
+            location = str(response.url.join(response.headers["location"]))
+        finally:
+            await response.aclose()
+        return await self._download_url(location, target, kind=kind, deadline=deadline)
 
     async def download_url_to_file(
         self,
         url: str,
         output_path: str,
         *,
+        kind: DownloadKind,
         server_supplied: bool = False,
         deadline: float | None = None,
     ) -> tuple[str, int]:
-        safe_path = safe_output_path(output_path, server_supplied=server_supplied)
-        data = await self.download_url_bytes(url, deadline=deadline)
-        written = await asyncio.to_thread(write_bytes_no_symlink, safe_path, data)
-        return str(safe_path), written
+        """Download a presigned URL into a confined path without sending API credentials."""
+        target = self.download_target(output_path, server_supplied=server_supplied)
+        return await self._download_url(url, target, kind=kind, deadline=deadline)
+
+    async def _download_url(
+        self, url: str, target: Path, *, kind: DownloadKind, deadline: float | None
+    ) -> tuple[str, int]:
+        timeout = self.settings.upload_timeout
+        if deadline is not None:
+            timeout = max(min(timeout, deadline - _monotonic()), 0.5)
+        try:
+            async with self._cdn_http.stream("GET", url, timeout=timeout) as response:
+                if _reached_cloudflare_access(response):
+                    raise CloudflareAccessError(
+                        "Storage download was redirected to a Cloudflare Access login; "
+                        + "nothing was saved and any previous file was kept.",
+                        status=response.status_code,
+                        hint="Regenerate the presigned URL, or check EVERESTEER_BASE_URL.",
+                    )
+                if response.status_code >= 400:
+                    await response.aread()
+                    raise ServerError(
+                        f"Storage download returned HTTP {response.status_code}.",
+                        status=response.status_code,
+                        detail=response.text[:200],
+                    )
+                return await self._save(response, target, kind=kind, label="Storage download")
+        except httpx2.RequestError as exc:
+            raise NetworkError(
+                f"Failed to download artifact from storage ({type(exc).__name__}).",
+                hint="Retry the download or regenerate the presigned URL if it expired.",
+            ) from exc
+
+    @staticmethod
+    async def _save(
+        response: httpx2.Response, target: Path, *, kind: DownloadKind, label: str
+    ) -> tuple[str, int]:
+        """Stream a response body into `target` atomically after checking it is a `kind` file."""
+        problem = media_problem(kind, response.headers.get("content-type", ""))
+        if problem is not None:
+            preview = (await response.aread())[:200].decode("utf-8", "replace")
+            raise _invalid_download(label, problem, preview, response.status_code)
+        staged = await asyncio.to_thread(StagedDownload.open, target)
+        try:
+            async for chunk in response.aiter_bytes(_CHUNK_BYTES):
+                await asyncio.to_thread(staged.write, chunk)
+            problem = body_problem(kind, staged.head, staged.tail, staged.size)
+            if problem is not None:
+                raise _invalid_download(label, problem, "", response.status_code)
+            written = await asyncio.to_thread(staged.publish)
+        except httpx2.RequestError as exc:
+            staged.discard()
+            raise NetworkError(
+                f"{label} was interrupted ({type(exc).__name__}); any previous file was kept.",
+                hint="Retry the download.",
+            ) from exc
+        except BaseException:
+            staged.discard()
+            raise
+        return str(target), written
 
     async def s3_upload(
         self,
@@ -525,10 +645,9 @@ class EveresteerClient:
         digest = hashlib.sha256(data).hexdigest()
         return data, os.path.basename(name), digest
 
-    @staticmethod
-    def resolve_download_path(output_path: str | None, default_name: str) -> Path:
+    def resolve_download_path(self, output_path: str | None, default_name: str) -> Path:
         return (
-            safe_output_path(output_path)
+            self.download_target(output_path)
             if output_path
-            else safe_output_path(default_name, server_supplied=True)
+            else self.download_target(default_name, server_supplied=True)
         )

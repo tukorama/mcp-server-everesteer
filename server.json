@@ -60,6 +60,11 @@
           "isRequired": false
         },
         {
+          "name": "EVERESTEER_DOWNLOAD_DIR",
+          "description": "Directories (os.pathsep-separated) that download tools may write into; defaults to the server's working directory.",
+          "isRequired": false
+        },
+        {
           "name": "CF_ACCESS_CLIENT_ID",
           "description": "Optional Cloudflare Access service token client id (for staging hosts).",
           "isRequired": false
