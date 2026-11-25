@@ -30,7 +30,7 @@ _KEYED_REPEAT_STATES: frozenset[WriteState] = frozenset({"pending", "unknown", "
 
 @dataclass(frozen=True)
 class Idempotency:
-    """Send a write with an Idempotency-Key, reusing the key of an identical attempt in doubt."""
+    """Send a write with an Idempotency-Key; an identical unknown-outcome retry reuses its key."""
 
     requested: str | None = None
 
@@ -140,26 +140,33 @@ def _in_doubt(entry: JournalEntry) -> str:
     return "is still in flight" if entry.status == "pending" else "has an unknown outcome"
 
 
+def _duplicate_refusal(previous: JournalEntry) -> Refused:
+    return Refused(
+        f"An identical write ({previous.id}) {_in_doubt(previous)}.",
+        hint="Inspect account state (`get_status` / `get_wallet_status` / "
+        + "`list_unconfirmed_writes`) before retrying.",
+    )
+
+
 def block_duplicate(call: "Call", print_: str) -> None:
     """Refuse an identical write while a previous attempt is pending or unknown."""
     previous = call.runtime.journal.pending_duplicate(print_)
     if previous is not None:
-        raise Refused(
-            f"An identical write ({previous.id}) {_in_doubt(previous)}.",
-            hint="Inspect account state (`get_status` / `get_wallet_status` / "
-            + "`list_unconfirmed_writes`) before retrying.",
-        )
+        raise _duplicate_refusal(previous)
 
 
 def claim_idempotency_key(call: "Call", print_: str, requested: str | None) -> str:
     """Pick the Idempotency-Key for an identical-write-sensitive call such as a withdrawal.
 
-    An identical attempt that is still pending or unknown is retried under its own key, so
-    Everesteer can deduplicate it. One that already succeeded inside the window is refused.
+    An identical attempt whose outcome is unknown is retried under its own key, so Everesteer
+    can deduplicate it. One that is still in flight, or that already succeeded inside the
+    window, is refused.
     """
     previous = call.runtime.journal.latest_duplicate(print_, _KEYED_REPEAT_STATES)
     if previous is None:
         return requested or str(uuid.uuid4())
+    if previous.status == "pending":
+        raise _duplicate_refusal(previous)
     if previous.status == "sent":
         raise Refused(
             f"An identical write ({previous.id}) already succeeded in the last "

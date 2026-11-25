@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- `withdraw_usdc` no longer sends an identical retry of a timed-out withdrawal under a fresh `Idempotency-Key`. The key is left out of the duplicate fingerprint and stored in the journal; a retry of a `pending` or `unknown` withdrawal reuses it and counts once toward the daily cap, a retry under a different key is refused, and so is a repeat of an identical withdrawal that already succeeded within 15 minutes.
+- `withdraw_usdc` no longer sends an identical retry of a timed-out withdrawal under a fresh `Idempotency-Key`. The key is left out of the duplicate fingerprint and stored in the journal; a retry of an `unknown` withdrawal reuses it and counts once toward the daily cap, a retry under a different key is refused, and so are an identical withdrawal that is still in flight and a repeat of one that already succeeded within 15 minutes.
 - `set_staking_plan(enabled=False)` no longer fails after confirmation; a plan without an amount records no USDC movement.
 - Per-call limits, the daily cap, the duplicate guard, and path arguments are checked before the confirmation prompt, so a confirmed write is not refused by a check that could have run first.
 - The daily USDC cap is checked and the write recorded in one `BEGIN IMMEDIATE` SQLite transaction, so server processes sharing a journal cannot overshoot `EVERESTEER_MAX_DAILY_USDC`. `relay_stake` counts as `EVERESTEER_MAX_STAKE_USDC` (the whole daily cap when that limit is `unlimited`; refused when it is `0`), and a per-round stake plan counts on every UTC day while it is in force. Journals created by 0.1.1 are upgraded in place.

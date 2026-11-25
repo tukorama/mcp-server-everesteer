@@ -4,8 +4,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx2
 import pytest
+from mcp import Client
 from mcp.types import ElicitResult
 
 from mcp_server_everesteer.client import endpoints as ep
@@ -38,6 +40,42 @@ class Prompts:
 
 def _idempotency_keys(api: FakeApi) -> list[str]:
     return [request.headers["idempotency-key"] for request in api.calls(ep.STAKING_WITHDRAW)]
+
+
+async def _withdraw_while_another_server_has_it_in_flight(
+    settings: Settings, api: FakeApi, prompts: Prompts
+) -> tuple[str, dict[str, Any]]:
+    """Hold one server's withdrawal POST open and repeat it from a second server meanwhile."""
+    in_flight, release = anyio.Event(), anyio.Event()
+    posts = 0
+
+    async def hold_the_first_post(_request: httpx2.Request) -> dict[str, str]:
+        nonlocal posts
+        posts += 1
+        if posts == 1:
+            in_flight.set()
+            await release.wait()
+        return WITHDRAWN
+
+    api.add(ep.STAKING_WITHDRAW, hold_the_first_post)
+    args = {"to_address": WALLET, "amount_usdc": "10", "idempotency_key": "wd-key-1"}
+    first: dict[str, Any] = {}
+    message = ""
+
+    async def withdraw_first(client: Client) -> None:
+        first.update(await call(client, "withdraw_usdc", **args))
+
+    with anyio.fail_after(30):
+        async with (
+            session(settings, api, elicitation_callback=prompts) as busy,
+            session(settings, api, elicitation_callback=prompts) as other,
+            anyio.create_task_group() as group,
+        ):
+            group.start_soon(withdraw_first, busy)
+            await in_flight.wait()
+            message = await error(other, "withdraw_usdc", **args)
+            release.set()
+    return message, first
 
 
 async def test_staking_and_withdrawals_end_to_end(authed_settings: Settings, api: FakeApi) -> None:
@@ -132,6 +170,34 @@ async def test_withdrawal_retry_with_the_same_key_is_sent_for_server_dedupe(
         assert (await call(client, "withdraw_usdc", **args))["status"] == "ok"
 
     assert _idempotency_keys(api) == ["wd-key-1", "wd-key-1"]
+
+
+async def test_identical_withdrawal_in_flight_elsewhere_is_refused_and_not_sent(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+
+    message, first = await _withdraw_while_another_server_has_it_in_flight(
+        authed_settings, api, Prompts()
+    )
+
+    assert "is still in flight" in message
+    assert first["status"] == "ok"
+    assert _idempotency_keys(api) == ["wd-key-1"]
+
+
+async def test_identical_withdrawal_in_flight_elsewhere_is_refused_before_confirmation(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_withdrawals = True
+    prompts = Prompts()
+
+    message, _ = await _withdraw_while_another_server_has_it_in_flight(
+        authed_settings, api, prompts
+    )
+
+    assert "is still in flight" in message
+    assert len(prompts.seen) == 1
 
 
 async def test_withdrawal_retry_under_a_different_key_is_refused(

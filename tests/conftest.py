@@ -1,5 +1,6 @@
 """Shared pytest fixtures and MockTransport harness for mcp-server-everesteer."""
 
+import inspect
 import json
 import os
 from collections import deque
@@ -54,7 +55,7 @@ class FakeApi:
     ) -> None:
         self.cdn_routes[url] = (status, body, headers or {})
 
-    def _handle(self, request: httpx2.Request) -> httpx2.Response:
+    async def _handle(self, request: httpx2.Request) -> httpx2.Response:
         host = (request.url.host or "").lower()
         if host in self.cdn_hosts:
             # Verify presigned storage requests NEVER receive Everesteer or CF Access credentials.
@@ -87,6 +88,8 @@ class FakeApi:
         if callable(body):
             fn: Callable[[httpx2.Request], Any] = body
             body = fn(request)
+            if inspect.isawaitable(body):
+                body = await body
         if isinstance(body, httpx2.Response):
             return body
         if isinstance(body, str | bytes):

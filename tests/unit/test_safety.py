@@ -5,6 +5,7 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
+import anyio
 import httpx2
 import pytest
 
@@ -124,6 +125,45 @@ async def test_daily_cap_holds_when_two_server_processes_share_one_journal(
             await stake_40(process_a, "m1")
         assert len(api.calls(ep.STAKING_STAKE)) == 1
         assert first.journal.spent_today("staking") == Decimal("40")
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+async def test_withdrawal_in_flight_in_another_process_is_refused_when_recorded(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    in_flight, release = anyio.Event(), anyio.Event()
+    posts = 0
+
+    async def hold_the_first_post(_request: httpx2.Request) -> dict[str, str]:
+        nonlocal posts
+        posts += 1
+        if posts == 1:
+            in_flight.set()
+            await release.wait()
+        return {"tx_id": "wd-1", "status": "submitted"}
+
+    async def withdraw(runtime: Runtime) -> WriteResult:
+        return await staking.withdraw_usdc(
+            Call(runtime=runtime),
+            to_address=WALLET,
+            amount_usdc="10",
+            idempotency_key="wd-key-1",
+        )
+
+    api.add(ep.STAKING_WITHDRAW, hold_the_first_post)
+    first = Runtime.create(authed_settings, transport=api.transport)
+    second = Runtime.create(authed_settings, transport=api.transport)
+    try:
+        with anyio.fail_after(30):
+            async with anyio.create_task_group() as group:
+                group.start_soon(withdraw, first)
+                await in_flight.wait()
+                with pytest.raises(Refused, match="is still in flight"):
+                    await withdraw(second)
+                release.set()
+        assert len(api.calls(ep.STAKING_WITHDRAW)) == 1
     finally:
         await first.aclose()
         await second.aclose()
