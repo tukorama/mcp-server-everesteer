@@ -79,10 +79,15 @@ class ApiPayload(CompactModel):
         return cls.model_validate({"items": cleaned, **extra_fields})
 
 
+WriteStatus = Literal[
+    "ok", "accepted", "declined", "unknown", "preview", "pending", "partial", "rejected"
+]
+
+
 class WriteResult(CompactModel):
     """Outcome of a mutating, gated, or confirmed operation."""
 
-    status: Literal["ok", "accepted", "declined", "unknown", "preview", "pending"] = "ok"
+    status: WriteStatus = "ok"
     message: str | None = None
     request_id: str | None = None
     next_step: str | None = None
@@ -94,7 +99,7 @@ class WriteResult(CompactModel):
         cls,
         raw: Any,
         *,
-        status: Literal["ok", "accepted", "declined", "unknown", "preview", "pending"] = "ok",
+        status: WriteStatus = "ok",
         message: str | None = None,
         request_id: str | None = None,
         next_step: str | None = None,

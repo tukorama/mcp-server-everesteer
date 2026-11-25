@@ -195,6 +195,174 @@ async def test_compete_reads_submissions_and_diagnostics(
         )
 
 
+@pytest.mark.parametrize(
+    ("name", "content", "named"),
+    [
+        ("preds.json", '{"ES": true, "NQ": 0.5}', "ES=True"),
+        ("preds.json", '{"ES": null, "NQ": 0.5}', "ES=None"),
+        ("preds.json", '{"ES": NaN, "NQ": 0.5}', "ES=nan"),
+        ("preds.csv", "id,prediction\nES,\nNQ,0.5\n", "ES=''"),
+        (
+            "preds.json",
+            '[{"id": "ES", "prediction": null}, {"id": "NQ", "prediction": 0.5}]',
+            "ES=None",
+        ),
+    ],
+)
+async def test_prediction_files_with_non_numbers_are_refused_by_instrument(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path, name: str, content: str, named: str
+) -> None:
+    authed_settings.allow_writes = True
+    path = tmp_path / name
+    path.write_text(content, encoding="utf-8")
+    api.add(ep.FUTURES_VALIDATE, {"valid": True})
+    api.add(ep.FUTURES_SUBMIT_V2, {"submission_id": "sub-1"})
+
+    async with session(authed_settings, api) as client:
+        validate = await error(client, "validate_futures_submission", predictions_path=str(path))
+        submit = await error(
+            client,
+            "submit_futures_predictions",
+            model_id="m1",
+            predictions_path=str(path),
+            exped="exped_20261119",
+        )
+
+    for message in (validate, submit):
+        assert named in message
+        assert "not finite numbers" in message
+    assert api.calls(ep.FUTURES_VALIDATE) == []
+    assert api.calls(ep.FUTURES_SUBMIT_V2) == []
+
+
+async def test_empty_prediction_mappings_are_refused(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path
+) -> None:
+    authed_settings.allow_writes = True
+    empty = tmp_path / "preds.json"
+    empty.write_text("{}", encoding="utf-8")
+    api.add(ep.FUTURES_SUBMIT_V2, {"submission_id": "sub-1"})
+
+    async with session(authed_settings, api) as client:
+        from_file = await error(
+            client,
+            "submit_futures_predictions",
+            model_id="m1",
+            predictions_path=str(empty),
+            exped="exped_20261119",
+        )
+        inline = await error(
+            client, "submit_futures_predictions", model_id="m1", predictions={}, exped="e1"
+        )
+
+    assert "No predictions found" in from_file
+    assert "No predictions found" in inline
+    assert api.calls(ep.FUTURES_SUBMIT_V2) == []
+
+
+@pytest.mark.parametrize("current", [{"exped": None, "instruments": []}, {"instruments": ["ES"]}])
+async def test_unresolvable_open_round_is_refused_instead_of_submitting(
+    authed_settings: Settings, api: FakeApi, current: dict[str, Any]
+) -> None:
+    authed_settings.allow_writes = True
+    api.add(ep.FUTURES_CURRENT_INSTRUMENTS, current)
+    api.add(ep.FUTURES_SUBMIT_V2, {"submission_id": "sub-1"})
+
+    async with session(authed_settings, api) as client:
+        single = await error(
+            client, "submit_futures_predictions", model_id="m1", predictions={"ES": 0.5}
+        )
+        batch = await error(
+            client,
+            "submit_futures_predictions_batch",
+            items=[{"model_id": "m1", "predictions": {"ES": 0.5}}],
+        )
+
+    for message in (single, batch):
+        assert "Could not resolve the open futures round's exped" in message
+    assert api.calls(ep.FUTURES_SUBMIT_V2) == []
+
+
+async def test_batch_status_reports_rejected_and_partial_outcomes(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_writes = True
+    api.add(ep.FUTURES_SUBMIT_V2, {"submission_id": "sub-1"})
+
+    async with session(authed_settings, api) as client:
+        rejected = await call(
+            client,
+            "submit_futures_predictions_batch",
+            exped="e1",
+            items=[
+                {"model_id": "m1", "predictions": {"ES": 2.5}},
+                {"model_id": "m2", "predictions": {"ES": -1}},
+            ],
+        )
+        partial = await call(
+            client,
+            "submit_futures_predictions_batch",
+            exped="e1",
+            items=[
+                {"model_id": "m1", "predictions": {"ES": 0.5}},
+                {"model_id": "m2", "predictions": {"ES": 2.5}},
+            ],
+        )
+
+    assert (rejected["status"], rejected["failed"], rejected["all_succeeded"]) == (
+        "rejected",
+        2,
+        False,
+    )
+    assert (partial["status"], partial["failed"], partial["all_succeeded"]) == ("partial", 1, False)
+
+
+async def test_diagnostics_batch_with_only_failures_is_rejected(
+    authed_settings: Settings, api: FakeApi, tmp_path: Path
+) -> None:
+    authed_settings.allow_writes = True
+
+    async with session(authed_settings, api) as client:
+        result = await call(
+            client,
+            "submit_diagnostics_batch",
+            items=[{"model_id": "m1", "file_path": str(tmp_path / "missing.parquet")}],
+        )
+
+    assert (result["status"], result["failed"]) == ("rejected", 1)
+    assert api.requests == []
+
+
+async def test_batch_sends_inline_predictions_as_numbers(
+    authed_settings: Settings, api: FakeApi
+) -> None:
+    authed_settings.allow_writes = True
+    api.add(ep.FUTURES_SUBMIT_V2, {"submission_id": "sub-1"})
+
+    async with session(authed_settings, api) as client:
+        result = await call(
+            client,
+            "submit_futures_predictions_batch",
+            exped="e1",
+            items=[{"model_id": "m1", "predictions": {"ES": "0.25", "NQ": 1}}],
+        )
+        bad = await call(
+            client,
+            "submit_futures_predictions_batch",
+            exped="e1",
+            items=[{"model_id": "m1", "predictions": {"ES": True}}],
+        )
+
+    assert result["status"] == "ok"
+    assert api.json_body(ep.FUTURES_SUBMIT_V2, 0)["predictions"] == [
+        {"instrument_id": "ES", "prediction": 0.25},
+        {"instrument_id": "NQ", "prediction": 1.0},
+    ]
+    assert bad["status"] == "rejected"
+    assert "ES=True" in bad["items"][0]["error"]
+    assert len(api.calls(ep.FUTURES_SUBMIT_V2)) == 1
+
+
 async def test_compute_pricing_training_wait_cap_and_artifacts(
     authed_settings: Settings,
     api: FakeApi,
